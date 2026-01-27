@@ -14,7 +14,7 @@ PCT_PAGANTES = 0.25
 SLUG_LIGA_PADRAO = "os-pia-do-cartola"
 SENHA_ADMIN = "c@rtol@2026"
 NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
-TOTAL_RODADAS_TURNO = 19 # Define o tamanho fixo da tabela
+TOTAL_RODADAS_TURNO = 19  # Define o tamanho fixo da tabela (Turno)
 
 COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"]
 
@@ -80,12 +80,15 @@ def carregar_dados():
         df = pd.DataFrame(data)
         df.columns = [str(c).strip() for c in df.columns]
 
+        # Filtro Anti-Duplicidade
         if "Time" in df.columns: df = df[df["Time"].astype(str) != "Time"]
         if "Valor" in df.columns: df = df[df["Valor"].astype(str) != "Valor"]
 
+        # Garante colunas mínimas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
+        # Conversão de Tipos Segura
         if "Valor" in df.columns:
             df["Valor"] = pd.to_numeric(
                 df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False),
@@ -112,6 +115,7 @@ def salvar_dados(df):
         df_save["Valor"] = df_save["Valor"].fillna(0.0)
         df_save["Rodada"] = df_save["Rodada"].fillna(0).astype(int)
         
+        # Preenche vazios para não quebrar API
         df_save = df_save.fillna("")
         
         sheet.clear()
@@ -164,6 +168,7 @@ with st.container():
 
 df_fin, status_msg = carregar_dados()
 
+# --- ORDEM FINAL: RESUMO -> PENDÊNCIAS -> ADMIN ---
 tab_resumo, tab_pendencias, tab_admin = st.tabs(["📋 Resumo", "💰 Pendências", "⚙️ Painel Admin"])
 
 # --- ABA 1: RESUMO ---
@@ -173,14 +178,19 @@ with tab_resumo:
     if valid_db:
         try:
             df_v = df_fin.copy()
+            # Lógica Visual: None = Sem checkbox | True/False = Checkbox
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
+            
+            # Garante que rodada é string para o pivot funcionar
             df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
             
+            # Pivot dos dados existentes
             matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
             
-            # --- PADRONIZAÇÃO VISUAL: FORÇA AS 19 COLUNAS ---
+            # --- PADRONIZAÇÃO VISUAL (1 a 19) ---
             todas_rodadas = [str(i) for i in range(1, TOTAL_RODADAS_TURNO + 1)]
-            matrix = matrix.reindex(columns=todas_rodadas) # Cria colunas vazias se não existirem
+            # Reindex força que as colunas 1..19 existam. Colunas sem dados viram NaN (None)
+            matrix = matrix.reindex(columns=todas_rodadas)
 
             cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
             
@@ -199,7 +209,7 @@ with tab_resumo:
                 "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)
             }
             
-            # Aplica config para todas as 19 rodadas (existentes ou futuras)
+            # Configura checkboxes para TODAS as 19 colunas
             for c in todas_rodadas:
                 cfg[c] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
@@ -239,11 +249,14 @@ with tab_pendencias:
             
             st.divider()
             
+            # Filtro Seguro
             df_devs = df_fin[(df_fin["Valor"] > 0) & (df_fin["Pago"] == False)].copy()
             
             if not df_devs.empty:
+                # Agrupamento seguro com nomes definidos
                 tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
                 tabela_dev = tabela_dev.sort_values("Devendo", ascending=False)
+                
                 st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
             else:
                 st.success("Tudo pago! Ninguém devendo.")
@@ -264,7 +277,7 @@ with tab_admin:
     st.subheader("Lançar Rodada")
     c1, c2 = st.columns([2, 1])
     origem = c1.radio("Fonte:", ["Excel", "API"], horizontal=True)
-    rod = c2.number_input("Rodada", 1, 19, 1)
+    rod = c2.number_input("Rodada", 1, TOTAL_RODADAS_TURNO, 1)
     
     if 'temp' not in st.session_state: st.session_state['temp'] = pd.DataFrame(columns=["Time", "Pontos"])
     
