@@ -48,7 +48,7 @@ def verificar_senha():
     else:
         st.toast("⛔ Senha incorreta!", icon="❌")
 
-# --- 4. CONEXÃO GOOGLE SHEETS (BLINDADA) ---
+# --- 4. CONEXÃO GOOGLE SHEETS ---
 @st.cache_resource(ttl=30)
 def conectar_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -64,8 +64,8 @@ def conectar_gsheets():
 def resetar_banco_dados():
     sheet = conectar_gsheets()
     if sheet:
-        sheet.clear() # Limpa TUDO
-        sheet.append_row(COLUNAS_ESPERADAS) # Adiciona APENAS UM cabeçalho
+        sheet.clear()
+        sheet.append_row(COLUNAS_ESPERADAS)
         return True
     return False
 
@@ -79,18 +79,25 @@ def carregar_dados():
             return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio (Resetado)"
         
         df = pd.DataFrame(data)
-        df.columns = [str(c).strip() for c in df.columns]
         
-        # --- FILTRO DE SEGURANÇA (NOVIDADE V15) ---
-        # Se houver linhas repetidas de cabeçalho (ex: Valor == "Valor"), remove elas
-        if "Valor" in df.columns:
-            df = df[df["Valor"].astype(str) != "Valor"]
+        # 1. Normaliza nomes das colunas (remove espaços)
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # --- A CORREÇÃO MÁGICA (FILTRO PENEIRA) ---
+        # Antes de converter qualquer coisa, removemos linhas duplicadas do cabeçalho
+        if "Time" in df.columns:
+            # Mantém apenas as linhas onde "Time" NÃO É IGUAL a palavra "Time"
+            df = df[df["Time"].astype(str) != "Time"]
             
-        # Garante colunas
+        if "Valor" in df.columns:
+            # Mantém apenas linhas onde "Valor" NÃO É IGUAL a palavra "Valor"
+            df = df[df["Valor"].astype(str) != "Valor"]
+        
+        # 2. Garante existência das colunas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
-        # Conversão Forçada
+        # 3. Conversão de Tipos (Agora segura, pois removemos o lixo antes)
         if "Valor" in df.columns:
             df["Valor"] = df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False)
             df["Valor"] = pd.to_numeric(df["Valor"], errors='coerce').fillna(0.0)
@@ -112,8 +119,9 @@ def salvar_dados(df):
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
         df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
         
-        # Limpa TUDO antes de escrever para evitar duplicar cabeçalho
+        # Limpa TUDO antes de escrever
         sheet.clear()
+        # Escreve Cabeçalho + Dados
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
 # --- 5. LÓGICA ---
