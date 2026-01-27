@@ -64,8 +64,8 @@ def conectar_gsheets():
 def resetar_banco_dados():
     sheet = conectar_gsheets()
     if sheet:
-        sheet.clear()
-        sheet.append_row(COLUNAS_ESPERADAS)
+        sheet.clear() # Limpa TUDO
+        sheet.append_row(COLUNAS_ESPERADAS) # Adiciona APENAS UM cabeçalho
         return True
     return False
 
@@ -79,50 +79,40 @@ def carregar_dados():
             return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio (Resetado)"
         
         df = pd.DataFrame(data)
-        
-        # 1. Normaliza nomes das colunas (remove espaços)
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 2. Garante existência das colunas
+        # --- FILTRO DE SEGURANÇA (NOVIDADE V15) ---
+        # Se houver linhas repetidas de cabeçalho (ex: Valor == "Valor"), remove elas
+        if "Valor" in df.columns:
+            df = df[df["Valor"].astype(str) != "Valor"]
+            
+        # Garante colunas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
-        # 3. CONVERSÃO FORÇADA DE TIPOS (AQUI ESTAVA O ERRO)
-        # Força "Valor" a ser float. Erros viram 0.0
+        # Conversão Forçada
         if "Valor" in df.columns:
-            df["Valor"] = pd.to_numeric(
-                df["Valor"].astype(str).str.replace(r"[R$]", "", regex=True).str.replace(",", "."), 
-                errors='coerce'
-            ).fillna(0.0)
+            df["Valor"] = df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False)
+            df["Valor"] = pd.to_numeric(df["Valor"], errors='coerce').fillna(0.0)
         
-        # Força "Rodada" a ser Inteiro.
         if "Rodada" in df.columns:
             df["Rodada"] = pd.to_numeric(df["Rodada"], errors='coerce').fillna(0).astype(int)
             
-        # Força "Pago" a ser Booleano
         if "Pago" in df.columns:
             df["Pago"] = df["Pago"].astype(str).str.upper().apply(lambda x: True if x in ["TRUE", "VERDADEIRO", "SIM", "1"] else False)
 
         return df, "Sucesso"
     except Exception as e:
-        return pd.DataFrame(columns=COLUNAS_ESPERADAS), f"Erro Crítico na Leitura: {e}"
+        return pd.DataFrame(columns=COLUNAS_ESPERADAS), f"Erro: {e}"
 
 def salvar_dados(df):
     sheet = conectar_gsheets()
     if sheet:
-        # Garante estrutura
-        df_save = df.reindex(columns=COLUNAS_ESPERADAS)
-        
-        # Prepara para serialização JSON (Google Sheets)
-        # Float vira float, Int vira Int. NaN vira ""
-        df_save["Valor"] = df_save["Valor"].fillna(0.0)
-        df_save["Rodada"] = df_save["Rodada"].fillna(0).astype(int)
-        df_save["Pontos"] = df_save["Pontos"].fillna(0.0)
-        
-        # Converte booleanos e Datas explicitamente para String
+        df_save = df.reindex(columns=COLUNAS_ESPERADAS).fillna("")
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
         df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
         
+        # Limpa TUDO antes de escrever para evitar duplicar cabeçalho
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
@@ -141,8 +131,7 @@ def calcular(df_ranking, df_hist, rod):
     rank = df_ranking.sort_values("Pontos").reset_index(drop=True)
     
     conta = pd.Series(dtype=int)
-    # Proteção: Só filtra histórico se tiver colunas válidas
-    if not df_hist.empty and "Rodada" in df_hist.columns and "Valor" in df_hist.columns:
+    if not df_hist.empty and "Rodada" in df_hist.columns:
         validos = df_hist[(df_hist["Rodada"] != rod) & (df_hist["Valor"] > 0)]
         if not validos.empty: conta = validos["Time"].value_counts()
     
@@ -161,7 +150,6 @@ def calcular(df_ranking, df_hist, rod):
 # --- 6. INTERFACE ---
 st.title("⚽ Os Piá do Cartola")
 
-# Botão Admin
 with st.container():
     st.markdown('<div class="admin-floating-container">', unsafe_allow_html=True)
     if not st.session_state['admin_unlocked']:
@@ -177,20 +165,13 @@ df_fin, status_msg = carregar_dados()
 
 tab1, tab2, tab3 = st.tabs(["📋 Resumo", "💰 Pendências", "⚙️ Painel Admin"])
 
-# ABA 1: RESUMO (PROTEGIDA)
 with tab1:
-    # Só tenta montar a matriz se tiver dados E se as colunas essenciais existirem
-    dados_validos = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns and "Pago" in df_fin.columns
-    
-    if dados_validos:
+    if not df_fin.empty and "Time" in df_fin.columns:
         try:
             df_v = df_fin.copy()
-            # Lógica visual: Se valor é 0, é Salvo (None). Se valor > 0, mostra checkbox (Pago/Devendo)
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
-            
             matrix = df_v.pivot_table(index="Time", columns="Rodada", values="V", aggfunc="last")
             cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
-            
             disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int).join(matrix)
             disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
             
@@ -214,13 +195,11 @@ with tab1:
                             if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
                                 df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
                     if change: salvar_dados(df_fin); st.toast("✅ Salvo!", icon="☁️"); time.sleep(1); st.rerun()
-        except Exception as e:
-            st.warning(f"Erro ao gerar visualização. Tente Resetar o Banco de Dados. Detalhe: {e}")
+        except: st.warning("Aguardando dados estruturados.")
     else: st.info("Banco de dados vazio.")
 
-# ABA 2: PENDÊNCIAS (PROTEGIDA)
 with tab2:
-    if dados_validos:
+    if not df_fin.empty and "Valor" in df_fin.columns:
         pg = df_fin[df_fin["Pago"]==True]["Valor"].sum()
         ab = df_fin[df_fin["Pago"]==False]["Valor"].sum()
         c1, c2, c3 = st.columns(3)
@@ -232,13 +211,12 @@ with tab2:
         else: st.success("Ninguém devendo!")
     else: st.info("Sem dados.")
 
-# ABA 3: ADMIN
 with tab3:
     if not st.session_state['admin_unlocked']: st.warning("Faça login no botão superior direito."); st.stop()
     
     with st.expander("🚨 Zona de Perigo"):
         if st.button("⚠️ RESETAR BANCO DE DADOS", type="primary"):
-            if resetar_banco_dados(): st.success("Resetado! Dados limpos."); time.sleep(2); st.rerun()
+            if resetar_banco_dados(): st.success("Resetado!"); time.sleep(2); st.rerun()
 
     st.subheader("Lançar Rodada")
     c1, c2 = st.columns([2, 1])
@@ -258,21 +236,15 @@ with tab3:
         if f:
             try:
                 x = pd.read_excel(f)
-                # MAPA DE SINÔNIMOS PARA EXCEL (Imagem 4)
                 x.columns = [str(c).strip().title() for c in x.columns]
-                mapa = {
-                    "Pontuação": "Pontos", "Pts": "Pontos", 
-                    "Nome": "Time", "Participante": "Time", "Equipe": "Time", "Cartoleiro": "Time"
-                }
+                mapa = {"Pontuação": "Pontos", "Pts": "Pontos", "Nome": "Time", "Participante": "Time", "Equipe": "Time", "Cartoleiro": "Time"}
                 x = x.rename(columns=mapa)
-                
                 if "Time" in x.columns:
                     col_p = "Pontos" if "Pontos" in x.columns else None
                     cols = ["Time", "Pontos"] if col_p else ["Time"]
                     st.session_state['temp'] = x[cols]
                     if not col_p: st.session_state['temp']["Pontos"] = 0.0
-                else:
-                    st.error(f"Colunas não identificadas. Encontrei: {list(x.columns)}")
+                else: st.error(f"Não achei coluna Time. Tem: {list(x.columns)}")
             except Exception as e: st.error(f"Erro Excel: {e}")
             
     st.session_state['temp'] = st.data_editor(st.session_state['temp'], num_rows="dynamic", use_container_width=True)
@@ -286,6 +258,6 @@ with tab3:
             old = df_fin[df_fin["Rodada"]!=rod] if "Rodada" in df_fin.columns else pd.DataFrame(columns=COLUNAS_ESPERADAS)
             new = pd.concat([old, pd.DataFrame(d+i+s)], ignore_index=True)
             salvar_dados(new)
-            st.toast("✅ Sucesso! Dados salvos na nuvem.", icon="☁️")
+            st.toast("✅ Salvo!", icon="☁️")
             time.sleep(2)
             st.rerun()
