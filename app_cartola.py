@@ -15,10 +15,9 @@ SLUG_LIGA_PADRAO = "os-pia-do-cartola"
 SENHA_ADMIN = "c@rtol@2026"
 NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
 
-# Colunas OBRIGATÓRIAS
 COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"]
 
-# --- 2. CONFIGURAÇÃO VISUAL (CSS) ---
+# --- 2. CONFIGURAÇÃO VISUAL ---
 st.set_page_config(page_title="Gestão Cartola PRO", layout="wide", page_icon="⚽")
 
 def configurar_css():
@@ -65,6 +64,7 @@ def resetar_banco_dados():
     sheet = conectar_gsheets()
     if sheet:
         sheet.clear()
+        # Aqui é o único lugar manual que cria cabeçalho se o user pedir RESET
         sheet.append_row(COLUNAS_ESPERADAS)
         return True
     return False
@@ -74,30 +74,24 @@ def carregar_dados():
     if not sheet: return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Erro Conexão"
     try:
         data = sheet.get_all_records()
+        
+        # --- MUDANÇA CRUCIAL AQUI ---
+        # Se não tem dados, retorna VAZIO na memória, mas NÃO ESCREVE nada na planilha.
         if not data:
-            sheet.append_row(COLUNAS_ESPERADAS)
-            return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio (Resetado)"
+            return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio"
         
         df = pd.DataFrame(data)
-        
-        # 1. Normaliza nomes das colunas (remove espaços)
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- A CORREÇÃO MÁGICA (FILTRO PENEIRA) ---
-        # Antes de converter qualquer coisa, removemos linhas duplicadas do cabeçalho
-        if "Time" in df.columns:
-            # Mantém apenas as linhas onde "Time" NÃO É IGUAL a palavra "Time"
-            df = df[df["Time"].astype(str) != "Time"]
-            
+        # Filtro Anti-Duplicidade (Remove linhas onde cabeçalho se repete no meio)
         if "Valor" in df.columns:
-            # Mantém apenas linhas onde "Valor" NÃO É IGUAL a palavra "Valor"
             df = df[df["Valor"].astype(str) != "Valor"]
-        
-        # 2. Garante existência das colunas
+            
+        # Garante colunas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
-        # 3. Conversão de Tipos (Agora segura, pois removemos o lixo antes)
+        # Conversão de Tipos
         if "Valor" in df.columns:
             df["Valor"] = df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False)
             df["Valor"] = pd.to_numeric(df["Valor"], errors='coerce').fillna(0.0)
@@ -119,9 +113,8 @@ def salvar_dados(df):
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
         df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
         
-        # Limpa TUDO antes de escrever
+        # ESTRATÉGIA SEGURA: Limpa tudo -> Escreve Cabeçalho -> Escreve Dados
         sheet.clear()
-        # Escreve Cabeçalho + Dados
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
 # --- 5. LÓGICA ---
@@ -204,7 +197,7 @@ with tab1:
                                 df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
                     if change: salvar_dados(df_fin); st.toast("✅ Salvo!", icon="☁️"); time.sleep(1); st.rerun()
         except: st.warning("Aguardando dados estruturados.")
-    else: st.info("Banco de dados vazio.")
+    else: st.info("Banco de dados vazio. Aguardando lançamentos.")
 
 with tab2:
     if not df_fin.empty and "Valor" in df_fin.columns:
