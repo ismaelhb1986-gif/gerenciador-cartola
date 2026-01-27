@@ -47,8 +47,8 @@ def verificar_senha():
     else:
         st.toast("⛔ Senha incorreta!", icon="❌")
 
-# --- 4. CONEXÃO GOOGLE SHEETS ---
-@st.cache_resource(ttl=30)
+# --- 4. CONEXÃO GOOGLE SHEETS (SEM CACHE PARA FORÇAR LIMPEZA) ---
+# Removi o TTL para garantir que ele sempre leia o dado real e não o cache sujo
 def conectar_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
@@ -64,7 +64,6 @@ def resetar_banco_dados():
     sheet = conectar_gsheets()
     if sheet:
         sheet.clear()
-        # Aqui é o único lugar manual que cria cabeçalho se o user pedir RESET
         sheet.append_row(COLUNAS_ESPERADAS)
         return True
     return False
@@ -74,27 +73,35 @@ def carregar_dados():
     if not sheet: return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Erro Conexão"
     try:
         data = sheet.get_all_records()
-        
-        # --- MUDANÇA CRUCIAL AQUI ---
-        # Se não tem dados, retorna VAZIO na memória, mas NÃO ESCREVE nada na planilha.
         if not data:
-            return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio"
+            sheet.append_row(COLUNAS_ESPERADAS)
+            return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio (Resetado)"
         
         df = pd.DataFrame(data)
+        
+        # 1. Normaliza cabeçalhos
         df.columns = [str(c).strip() for c in df.columns]
-
-        # Filtro Anti-Duplicidade (Remove linhas onde cabeçalho se repete no meio)
+        
+        # 2. FILTRO PENEIRA (CRUCIAL): Remove linhas que são repetições de cabeçalho
+        # Se a coluna "Time" tiver a palavra "Time", apaga a linha
+        if "Time" in df.columns:
+            df = df[df["Time"].astype(str) != "Time"]
+        
+        # Se a coluna "Valor" tiver a palavra "Valor", apaga a linha
         if "Valor" in df.columns:
             df = df[df["Valor"].astype(str) != "Valor"]
-            
-        # Garante colunas
+
+        # 3. Garante todas colunas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
-        # Conversão de Tipos
+        # 4. Converte Tipos (Blindagem contra erro de String)
         if "Valor" in df.columns:
-            df["Valor"] = df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False)
-            df["Valor"] = pd.to_numeric(df["Valor"], errors='coerce').fillna(0.0)
+            # Força conversão para números. Se der erro (texto), vira NaN
+            df["Valor"] = pd.to_numeric(
+                df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False),
+                errors='coerce'
+            ).fillna(0.0) # Transforma NaN em 0.0
         
         if "Rodada" in df.columns:
             df["Rodada"] = pd.to_numeric(df["Rodada"], errors='coerce').fillna(0).astype(int)
@@ -104,16 +111,17 @@ def carregar_dados():
 
         return df, "Sucesso"
     except Exception as e:
-        return pd.DataFrame(columns=COLUNAS_ESPERADAS), f"Erro: {e}"
+        return pd.DataFrame(columns=COLUNAS_ESPERADAS), f"Erro Leitura: {e}"
 
 def salvar_dados(df):
     sheet = conectar_gsheets()
     if sheet:
         df_save = df.reindex(columns=COLUNAS_ESPERADAS).fillna("")
+        # Formatação para evitar erros no Google Sheets
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
         df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
+        df_save["Valor"] = df_save["Valor"].apply(lambda x: float(x) if x != "" else 0.0)
         
-        # ESTRATÉGIA SEGURA: Limpa tudo -> Escreve Cabeçalho -> Escreve Dados
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
@@ -132,8 +140,12 @@ def calcular(df_ranking, df_hist, rod):
     rank = df_ranking.sort_values("Pontos").reset_index(drop=True)
     
     conta = pd.Series(dtype=int)
-    if not df_hist.empty and "Rodada" in df_hist.columns:
-        validos = df_hist[(df_hist["Rodada"] != rod) & (df_hist["Valor"] > 0)]
+    if not df_hist.empty and "Rodada" in df_hist.columns and "Valor" in df_hist.columns:
+        # Filtra apenas dados numéricos e válidos
+        validos = df_hist[
+            (df_hist["Rodada"] != rod) & 
+            (df_hist["Valor"] > 0)
+        ]
         if not validos.empty: conta = validos["Time"].value_counts()
     
     devs, imune, salvos = [], [], []
@@ -164,56 +176,14 @@ with st.container():
 
 df_fin, status_msg = carregar_dados()
 
-tab1, tab2, tab3 = st.tabs(["📋 Resumo", "💰 Pendências", "⚙️ Painel Admin"])
+# MUDANÇA DE ORDEM: Admin é o primeiro para você não perder o foco na importação
+tab_admin, tab_resumo, tab_pendencias = st.tabs(["⚙️ Painel Admin", "📋 Resumo", "💰 Pendências"])
 
-with tab1:
-    if not df_fin.empty and "Time" in df_fin.columns:
-        try:
-            df_v = df_fin.copy()
-            df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
-            matrix = df_v.pivot_table(index="Time", columns="Rodada", values="V", aggfunc="last")
-            cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
-            disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int).join(matrix)
-            disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
-            
-            for i in range(1, 20): 
-                if i not in disp.columns: disp[i] = None
-            disp.index.name = "Time"; disp = disp.reset_index().sort_values("Time")
-            
-            cfg = {"Time": st.column_config.TextColumn(disabled=True), "Status": st.column_config.TextColumn(width="small", disabled=True), "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)}
-            for i in range(1, 20): cfg[str(i)] = st.column_config.CheckboxColumn(f"{i}", width="small", disabled=not st.session_state['admin_unlocked'])
-            
-            edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
-            
-            if st.session_state['admin_unlocked']:
-                m = edit.melt(id_vars=["Time"], value_vars=[c for c in edit.columns if str(c).isdigit()], var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
-                if not m.empty:
-                    change = False
-                    for _, r in m.iterrows():
-                        mask = (df_fin["Time"]==r["Time"]) & (df_fin["Rodada"]==int(r["Rodada"])) & (df_fin["Valor"]>0)
-                        if mask.any():
-                            idx = df_fin[mask].index[0]
-                            if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
-                                df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
-                    if change: salvar_dados(df_fin); st.toast("✅ Salvo!", icon="☁️"); time.sleep(1); st.rerun()
-        except: st.warning("Aguardando dados estruturados.")
-    else: st.info("Banco de dados vazio. Aguardando lançamentos.")
-
-with tab2:
-    if not df_fin.empty and "Valor" in df_fin.columns:
-        pg = df_fin[df_fin["Pago"]==True]["Valor"].sum()
-        ab = df_fin[df_fin["Pago"]==False]["Valor"].sum()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Pago", f"R$ {pg:.2f}"); c2.metric("Aberto", f"R$ {ab:.2f}"); c3.metric("Rodadas", int(df_fin["Rodada"].max()) if "Rodada" in df_fin.columns else 0)
-        st.divider()
-        devs = df_fin[df_fin["Valor"]>0].groupby("Time").agg(Devendo=("Valor", lambda x: x[~df_fin.loc[x.index, "Pago"]].sum()))
-        lista = devs[devs["Devendo"]>0].sort_values("Devendo", ascending=False)
-        if not lista.empty: st.dataframe(lista.style.format("R$ {:.2f}").background_gradient(cmap="Reds"), use_container_width=True)
-        else: st.success("Ninguém devendo!")
-    else: st.info("Sem dados.")
-
-with tab3:
-    if not st.session_state['admin_unlocked']: st.warning("Faça login no botão superior direito."); st.stop()
+# --- ABA 3: ADMIN (AGORA A PRIMEIRA) ---
+with tab_admin:
+    if not st.session_state['admin_unlocked']: 
+        st.warning("🔒 Área restrita. Faça login no canto superior direito para lançar rodadas.")
+        st.stop()
     
     with st.expander("🚨 Zona de Perigo"):
         if st.button("⚠️ RESETAR BANCO DE DADOS", type="primary"):
@@ -256,9 +226,65 @@ with tab3:
         st.info(f"Simulação: {p} pagantes de {t} times.")
         
         if st.button("💾 Salvar Rodada"):
-            old = df_fin[df_fin["Rodada"]!=rod] if "Rodada" in df_fin.columns else pd.DataFrame(columns=COLUNAS_ESPERADAS)
-            new = pd.concat([old, pd.DataFrame(d+i+s)], ignore_index=True)
+            # Lógica para evitar duplicar rodadas
+            if not df_fin.empty and "Rodada" in df_fin.columns:
+                 df_limpo = df_fin[df_fin["Rodada"] != rod]
+            else:
+                 df_limpo = pd.DataFrame(columns=COLUNAS_ESPERADAS)
+                 
+            new = pd.concat([df_limpo, pd.DataFrame(d+i+s)], ignore_index=True)
             salvar_dados(new)
             st.toast("✅ Salvo!", icon="☁️")
             time.sleep(2)
             st.rerun()
+
+# --- ABA 1: RESUMO ---
+with tab_resumo:
+    # Verificação rígida para evitar erro visual
+    valid_db = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns
+    
+    if valid_db:
+        try:
+            df_v = df_fin.copy()
+            df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
+            matrix = df_v.pivot_table(index="Time", columns="Rodada", values="V", aggfunc="last")
+            cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
+            disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int).join(matrix)
+            disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
+            
+            for i in range(1, 20): 
+                if i not in disp.columns: disp[i] = None
+            disp.index.name = "Time"; disp = disp.reset_index().sort_values("Time")
+            
+            cfg = {"Time": st.column_config.TextColumn(disabled=True), "Status": st.column_config.TextColumn(width="small", disabled=True), "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)}
+            for i in range(1, 20): cfg[str(i)] = st.column_config.CheckboxColumn(f"{i}", width="small", disabled=not st.session_state['admin_unlocked'])
+            
+            edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
+            
+            if st.session_state['admin_unlocked']:
+                m = edit.melt(id_vars=["Time"], value_vars=[c for c in edit.columns if str(c).isdigit()], var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
+                if not m.empty:
+                    change = False
+                    for _, r in m.iterrows():
+                        mask = (df_fin["Time"]==r["Time"]) & (df_fin["Rodada"]==int(r["Rodada"])) & (df_fin["Valor"]>0)
+                        if mask.any():
+                            idx = df_fin[mask].index[0]
+                            if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
+                                df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
+                    if change: salvar_dados(df_fin); st.toast("✅ Salvo!", icon="☁️"); time.sleep(1); st.rerun()
+        except: st.warning("Aguardando dados estruturados.")
+    else: st.info("Banco de dados vazio.")
+
+# --- ABA 2: PENDÊNCIAS ---
+with tab_pendencias:
+    if valid_db:
+        pg = df_fin[df_fin["Pago"]==True]["Valor"].sum()
+        ab = df_fin[df_fin["Pago"]==False]["Valor"].sum()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Pago", f"R$ {pg:.2f}"); c2.metric("Aberto", f"R$ {ab:.2f}"); c3.metric("Rodadas", int(df_fin["Rodada"].max()) if "Rodada" in df_fin.columns else 0)
+        st.divider()
+        devs = df_fin[df_fin["Valor"]>0].groupby("Time").agg(Devendo=("Valor", lambda x: x[~df_fin.loc[x.index, "Pago"]].sum()))
+        lista = devs[devs["Devendo"]>0].sort_values("Devendo", ascending=False)
+        if not lista.empty: st.dataframe(lista.style.format("R$ {:.2f}").background_gradient(cmap="Reds"), use_container_width=True)
+        else: st.success("Ninguém devendo!")
+    else: st.info("Sem dados.")
