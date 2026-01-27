@@ -14,6 +14,7 @@ PCT_PAGANTES = 0.25
 SLUG_LIGA_PADRAO = "os-pia-do-cartola"
 SENHA_ADMIN = "c@rtol@2026"
 NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
+TOTAL_RODADAS_TURNO = 19 # Define o tamanho fixo da tabela
 
 COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"]
 
@@ -79,15 +80,12 @@ def carregar_dados():
         df = pd.DataFrame(data)
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Filtro Anti-Duplicidade
         if "Time" in df.columns: df = df[df["Time"].astype(str) != "Time"]
         if "Valor" in df.columns: df = df[df["Valor"].astype(str) != "Valor"]
 
-        # Garante colunas mínimas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
-        # Conversão de Tipos Segura
         if "Valor" in df.columns:
             df["Valor"] = pd.to_numeric(
                 df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False),
@@ -166,12 +164,97 @@ with st.container():
 
 df_fin, status_msg = carregar_dados()
 
-tab_admin, tab_resumo, tab_pendencias = st.tabs(["⚙️ Painel Admin", "📋 Resumo", "💰 Pendências"])
+tab_resumo, tab_pendencias, tab_admin = st.tabs(["📋 Resumo", "💰 Pendências", "⚙️ Painel Admin"])
 
-# --- ABA ADMIN ---
+# --- ABA 1: RESUMO ---
+with tab_resumo:
+    valid_db = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns
+    
+    if valid_db:
+        try:
+            df_v = df_fin.copy()
+            df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
+            df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
+            
+            matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
+            
+            # --- PADRONIZAÇÃO VISUAL: FORÇA AS 19 COLUNAS ---
+            todas_rodadas = [str(i) for i in range(1, TOTAL_RODADAS_TURNO + 1)]
+            matrix = matrix.reindex(columns=todas_rodadas) # Cria colunas vazias se não existirem
+
+            cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
+            
+            disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int)
+            disp = disp.join(matrix)
+            
+            disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
+            
+            disp.index.name = "Time"
+            disp = disp.reset_index().sort_values("Time")
+            
+            # Configuração das Colunas
+            cfg = {
+                "Time": st.column_config.TextColumn(disabled=True),
+                "Status": st.column_config.TextColumn(width="small", disabled=True),
+                "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)
+            }
+            
+            # Aplica config para todas as 19 rodadas (existentes ou futuras)
+            for c in todas_rodadas:
+                cfg[c] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
+            
+            edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
+            
+            # Salvamento
+            if st.session_state['admin_unlocked']:
+                m = edit.melt(id_vars=["Time"], value_vars=todas_rodadas, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
+                if not m.empty:
+                    change = False
+                    for _, r in m.iterrows():
+                        mask = (df_fin["Time"]==r["Time"]) & (df_fin["Rodada"]==int(r["Rodada"])) & (df_fin["Valor"]>0)
+                        if mask.any():
+                            idx = df_fin[mask].index[0]
+                            if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
+                                df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
+                    if change: salvar_dados(df_fin); st.toast("✅ Atualizado!", icon="☁️"); time.sleep(1); st.rerun()
+        except Exception as e: 
+            st.error(f"Erro Visualização Resumo: {e}")
+    else: st.info("Banco de dados vazio. Aguardando lançamentos do Admin.")
+
+# --- ABA 2: PENDÊNCIAS ---
+with tab_pendencias:
+    if valid_db:
+        try:
+            pg = df_fin[(df_fin["Pago"] == True) & (df_fin["Valor"] > 0)]["Valor"].sum()
+            ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
+            
+            max_rod = 0
+            if not df_fin["Rodada"].empty:
+                max_rod = int(df_fin["Rodada"].max())
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Pago", f"R$ {pg:.2f}")
+            c2.metric("Aberto", f"R$ {ab:.2f}")
+            c3.metric("Última Rodada", max_rod)
+            
+            st.divider()
+            
+            df_devs = df_fin[(df_fin["Valor"] > 0) & (df_fin["Pago"] == False)].copy()
+            
+            if not df_devs.empty:
+                tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
+                tabela_dev = tabela_dev.sort_values("Devendo", ascending=False)
+                st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
+            else:
+                st.success("Tudo pago! Ninguém devendo.")
+        except Exception as e:
+            st.error(f"Erro Pendências: {e}")
+    else: st.info("Sem dados.")
+
+# --- ABA 3: ADMIN ---
 with tab_admin:
     if not st.session_state['admin_unlocked']: 
-        st.warning("🔒 Área restrita. Faça login no canto superior direito.")
+        st.warning("🔒 Faça login no canto superior direito.")
         st.stop()
     
     with st.expander("🚨 Zona de Perigo"):
@@ -181,7 +264,7 @@ with tab_admin:
     st.subheader("Lançar Rodada")
     c1, c2 = st.columns([2, 1])
     origem = c1.radio("Fonte:", ["Excel", "API"], horizontal=True)
-    rod = c2.number_input("Rodada", 1, 19, 1) # Limitado a 19
+    rod = c2.number_input("Rodada", 1, 19, 1)
     
     if 'temp' not in st.session_state: st.session_state['temp'] = pd.DataFrame(columns=["Time", "Pontos"])
     
@@ -204,6 +287,7 @@ with tab_admin:
                     cols = ["Time", "Pontos"] if col_p else ["Time"]
                     st.session_state['temp'] = x[cols]
                     if not col_p: st.session_state['temp']["Pontos"] = 0.0
+                    st.session_state['temp'] = st.session_state['temp'].fillna(0)
                 else: st.error(f"Não achei coluna Time. Tem: {list(x.columns)}")
             except Exception as e: st.error(f"Erro Excel: {e}")
             
@@ -229,95 +313,3 @@ with tab_admin:
                 st.rerun()
         except Exception as e:
             st.error(f"Erro cálculo: {e}")
-
-# --- ABA RESUMO ---
-with tab_resumo:
-    valid_db = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns
-    
-    if valid_db:
-        try:
-            df_v = df_fin.copy()
-            df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
-            
-            # Garante que rodada seja string para o pivot
-            df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
-            
-            # Pivot
-            matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
-            
-            # Ordena apenas colunas que EXISTEM (para não dar erro procurando rodada 38 se só tem a 1)
-            cols_existentes = sorted(matrix.columns, key=lambda x: int(x) if x.isdigit() else 99)
-            matrix = matrix[cols_existentes]
-
-            # Contagem
-            cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
-            
-            disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int)
-            disp = disp.join(matrix)
-            
-            disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
-            disp.index.name = "Time"; disp = disp.reset_index().sort_values("Time")
-            
-            # Configuração das Colunas
-            cfg = {
-                "Time": st.column_config.TextColumn(disabled=True),
-                "Status": st.column_config.TextColumn(width="small", disabled=True),
-                "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)
-            }
-            
-            # Configura checkboxes dinamicamente só para as colunas que existem
-            for c in cols_existentes:
-                cfg[str(c)] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
-            
-            edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
-            
-            if st.session_state['admin_unlocked']:
-                m = edit.melt(id_vars=["Time"], value_vars=cols_existentes, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
-                if not m.empty:
-                    change = False
-                    for _, r in m.iterrows():
-                        mask = (df_fin["Time"]==r["Time"]) & (df_fin["Rodada"]==int(r["Rodada"])) & (df_fin["Valor"]>0)
-                        if mask.any():
-                            idx = df_fin[mask].index[0]
-                            if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
-                                df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
-                    if change: salvar_dados(df_fin); st.toast("✅ Salvo!", icon="☁️"); time.sleep(1); st.rerun()
-        except Exception as e: 
-            st.error(f"Erro Visualização Resumo: {e}")
-    else: st.info("Banco de dados vazio.")
-
-# --- ABA PENDÊNCIAS ---
-with tab_pendencias:
-    if valid_db:
-        try:
-            pg = df_fin[(df_fin["Pago"] == True) & (df_fin["Valor"] > 0)]["Valor"].sum()
-            ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
-            
-            # Evita erro se a coluna rodada estiver vazia
-            max_rod = 0
-            if not df_fin["Rodada"].empty:
-                max_rod = int(df_fin["Rodada"].max())
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Pago", f"R$ {pg:.2f}")
-            c2.metric("Aberto", f"R$ {ab:.2f}")
-            c3.metric("Última Rodada", max_rod)
-            
-            st.divider()
-            
-            # Correção Definitiva do Groupby
-            df_devs = df_fin[df_fin["Valor"] > 0].copy()
-            df_pend = df_devs[df_devs["Pago"] == False].copy()
-            
-            if not df_pend.empty:
-                # Agrupa e renomeia explicitamente para evitar Series sem nome
-                lista = df_pend.groupby("Time")["Valor"].sum().reset_index()
-                lista.columns = ["Time", "Devendo"]
-                lista = lista.sort_values("Devendo", ascending=False)
-                
-                st.dataframe(lista.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
-            else:
-                st.success("Tudo pago! Ninguém devendo.")
-        except Exception as e:
-            st.error(f"Erro Pendências: {e}")
-    else: st.info("Sem dados.")
