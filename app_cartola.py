@@ -47,8 +47,8 @@ def verificar_senha():
     else:
         st.toast("⛔ Senha incorreta!", icon="❌")
 
-# --- 4. CONEXÃO GOOGLE SHEETS (SEM CACHE PARA FORÇAR LIMPEZA) ---
-# Removi o TTL para garantir que ele sempre leia o dado real e não o cache sujo
+# --- 4. CONEXÃO GOOGLE SHEETS (PASSIVA) ---
+# Removemos o cache para garantir leitura fresca, mas tiramos qualquer comando de escrita daqui.
 def conectar_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
@@ -73,35 +73,33 @@ def carregar_dados():
     if not sheet: return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Erro Conexão"
     try:
         data = sheet.get_all_records()
+        
+        # --- MUDANÇA CRUCIAL: NÃO ESCREVE NADA SE ESTIVER VAZIO ---
         if not data:
-            sheet.append_row(COLUNAS_ESPERADAS)
-            return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio (Resetado)"
+            # Retorna DF vazio na memória, mas deixa a planilha quieta (em branco)
+            return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio"
         
         df = pd.DataFrame(data)
         
-        # 1. Normaliza cabeçalhos
+        # Normalização e Limpeza
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 2. FILTRO PENEIRA (CRUCIAL): Remove linhas que são repetições de cabeçalho
-        # Se a coluna "Time" tiver a palavra "Time", apaga a linha
+        # Filtro Anti-Duplicidade (Remove linhas que são repetição de cabeçalho)
         if "Time" in df.columns:
             df = df[df["Time"].astype(str) != "Time"]
-        
-        # Se a coluna "Valor" tiver a palavra "Valor", apaga a linha
         if "Valor" in df.columns:
             df = df[df["Valor"].astype(str) != "Valor"]
 
-        # 3. Garante todas colunas
+        # Garante colunas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
-        # 4. Converte Tipos (Blindagem contra erro de String)
+        # Tipagem Forte
         if "Valor" in df.columns:
-            # Força conversão para números. Se der erro (texto), vira NaN
             df["Valor"] = pd.to_numeric(
                 df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False),
                 errors='coerce'
-            ).fillna(0.0) # Transforma NaN em 0.0
+            ).fillna(0.0)
         
         if "Rodada" in df.columns:
             df["Rodada"] = pd.to_numeric(df["Rodada"], errors='coerce').fillna(0).astype(int)
@@ -117,7 +115,6 @@ def salvar_dados(df):
     sheet = conectar_gsheets()
     if sheet:
         df_save = df.reindex(columns=COLUNAS_ESPERADAS).fillna("")
-        # Formatação para evitar erros no Google Sheets
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
         df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
         df_save["Valor"] = df_save["Valor"].apply(lambda x: float(x) if x != "" else 0.0)
@@ -141,7 +138,6 @@ def calcular(df_ranking, df_hist, rod):
     
     conta = pd.Series(dtype=int)
     if not df_hist.empty and "Rodada" in df_hist.columns and "Valor" in df_hist.columns:
-        # Filtra apenas dados numéricos e válidos
         validos = df_hist[
             (df_hist["Rodada"] != rod) & 
             (df_hist["Valor"] > 0)
@@ -176,10 +172,10 @@ with st.container():
 
 df_fin, status_msg = carregar_dados()
 
-# MUDANÇA DE ORDEM: Admin é o primeiro para você não perder o foco na importação
+# ORDEM DAS ABAS: Admin primeiro para facilitar o primeiro uso
 tab_admin, tab_resumo, tab_pendencias = st.tabs(["⚙️ Painel Admin", "📋 Resumo", "💰 Pendências"])
 
-# --- ABA 3: ADMIN (AGORA A PRIMEIRA) ---
+# --- ABA 3: ADMIN ---
 with tab_admin:
     if not st.session_state['admin_unlocked']: 
         st.warning("🔒 Área restrita. Faça login no canto superior direito para lançar rodadas.")
@@ -240,7 +236,6 @@ with tab_admin:
 
 # --- ABA 1: RESUMO ---
 with tab_resumo:
-    # Verificação rígida para evitar erro visual
     valid_db = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns
     
     if valid_db:
