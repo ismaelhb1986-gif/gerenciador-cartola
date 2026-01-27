@@ -77,10 +77,9 @@ def carregar_dados():
             return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Vazio"
         
         df = pd.DataFrame(data)
-        # Limpa espaços nos nomes das colunas
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Filtro Anti-Duplicidade (Remove cabeçalhos repetidos no meio dos dados)
+        # Filtro Anti-Duplicidade
         if "Time" in df.columns: df = df[df["Time"].astype(str) != "Time"]
         if "Valor" in df.columns: df = df[df["Valor"].astype(str) != "Valor"]
 
@@ -90,18 +89,15 @@ def carregar_dados():
             
         # Conversão de Tipos Segura
         if "Valor" in df.columns:
-            # Remove R$, troca vírgula por ponto, converte pra float, se der erro vira 0
             df["Valor"] = pd.to_numeric(
                 df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False),
                 errors='coerce'
             ).fillna(0.0)
         
         if "Rodada" in df.columns:
-            # Converte pra numérico, preenche NaN com 0, vira Int
             df["Rodada"] = pd.to_numeric(df["Rodada"], errors='coerce').fillna(0).astype(int)
             
         if "Pago" in df.columns:
-            # Lógica Booleana robusta
             df["Pago"] = df["Pago"].astype(str).str.upper().apply(lambda x: True if x in ["TRUE", "VERDADEIRO", "SIM", "1"] else False)
 
         return df, "Sucesso"
@@ -111,16 +107,13 @@ def carregar_dados():
 def salvar_dados(df):
     sheet = conectar_gsheets()
     if sheet:
-        # Prepara cópia para salvar
         df_save = df.reindex(columns=COLUNAS_ESPERADAS).copy()
         
-        # Garante que tipos estão prontos para o Google Sheets (Strings simples)
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
         df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
         df_save["Valor"] = df_save["Valor"].fillna(0.0)
         df_save["Rodada"] = df_save["Rodada"].fillna(0).astype(int)
         
-        # Preenche vazios com string vazia para não quebrar JSON
         df_save = df_save.fillna("")
         
         sheet.clear()
@@ -188,7 +181,7 @@ with tab_admin:
     st.subheader("Lançar Rodada")
     c1, c2 = st.columns([2, 1])
     origem = c1.radio("Fonte:", ["Excel", "API"], horizontal=True)
-    rod = c2.number_input("Rodada", 1, 38, 1)
+    rod = c2.number_input("Rodada", 1, 19, 1) # Limitado a 19
     
     if 'temp' not in st.session_state: st.session_state['temp'] = pd.DataFrame(columns=["Time", "Pontos"])
     
@@ -235,63 +228,51 @@ with tab_admin:
                 time.sleep(2)
                 st.rerun()
         except Exception as e:
-            st.error(f"Erro: {e}")
+            st.error(f"Erro cálculo: {e}")
 
-# --- ABA RESUMO (CORRIGIDO) ---
+# --- ABA RESUMO ---
 with tab_resumo:
-    # Verificação de Segurança
     valid_db = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns
     
     if valid_db:
         try:
             df_v = df_fin.copy()
-            
-            # 1. Lógica Visual: None (Vazio) vs Booleano
-            # Se Valor=0, retorna None. Se Valor>0, retorna True/False
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
             
-            # 2. Pivot Table
-            # IMPORTANTE: Forçamos a coluna 'Rodada' para string para o Streamlit não confundir
-            df_v["Rodada_Str"] = df_v["Rodada"].astype(str)
+            # Garante que rodada seja string para o pivot
+            df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
             
+            # Pivot
             matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
             
-            # Reindexa colunas para garantir ordem "1", "2", "3"... até "38"
-            colunas_ordenadas = [str(i) for i in range(1, 39)]
-            matrix = matrix.reindex(columns=colunas_ordenadas)
+            # Ordena apenas colunas que EXISTEM (para não dar erro procurando rodada 38 se só tem a 1)
+            cols_existentes = sorted(matrix.columns, key=lambda x: int(x) if x.isdigit() else 99)
+            matrix = matrix[cols_existentes]
 
-            # 3. Contagem de Cobranças
+            # Contagem
             cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
             
-            # 4. Join Final
-            # Preenche apenas as cobranças com 0, mantendo os Nones da matrix
             disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int)
             disp = disp.join(matrix)
             
             disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
             disp.index.name = "Time"; disp = disp.reset_index().sort_values("Time")
             
-            # 5. Configuração Visual das Colunas
+            # Configuração das Colunas
             cfg = {
                 "Time": st.column_config.TextColumn(disabled=True),
                 "Status": st.column_config.TextColumn(width="small", disabled=True),
                 "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)
             }
             
-            # Configura checkboxes para colunas "1" até "38"
-            # O truque: width="small" resolve a coluna larga
-            for i in range(1, 39):
-                cfg[str(i)] = st.column_config.CheckboxColumn(f"{i}", width="small", disabled=not st.session_state['admin_unlocked'])
+            # Configura checkboxes dinamicamente só para as colunas que existem
+            for c in cols_existentes:
+                cfg[str(c)] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
-            # 6. Exibição
             edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
             
-            # 7. Salvamento
             if st.session_state['admin_unlocked']:
-                # Pega apenas colunas que são números (rodadas)
-                cols_rodadas = [c for c in edit.columns if c in colunas_ordenadas]
-                
-                m = edit.melt(id_vars=["Time"], value_vars=cols_rodadas, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
+                m = edit.melt(id_vars=["Time"], value_vars=cols_existentes, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
                 if not m.empty:
                     change = False
                     for _, r in m.iterrows():
@@ -305,33 +286,36 @@ with tab_resumo:
             st.error(f"Erro Visualização Resumo: {e}")
     else: st.info("Banco de dados vazio.")
 
-# --- ABA 3: PENDÊNCIAS (CORRIGIDO) ---
+# --- ABA PENDÊNCIAS ---
 with tab_pendencias:
     if valid_db:
         try:
-            # Cálculos seguros
             pg = df_fin[(df_fin["Pago"] == True) & (df_fin["Valor"] > 0)]["Valor"].sum()
             ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
             
-            # Busca rodada máxima
+            # Evita erro se a coluna rodada estiver vazia
             max_rod = 0
-            if "Rodada" in df_fin.columns and not df_fin["Rodada"].empty:
+            if not df_fin["Rodada"].empty:
                 max_rod = int(df_fin["Rodada"].max())
 
             c1, c2, c3 = st.columns(3)
             c1.metric("Pago", f"R$ {pg:.2f}")
             c2.metric("Aberto", f"R$ {ab:.2f}")
-            c3.metric("Rodadas", max_rod)
+            c3.metric("Última Rodada", max_rod)
             
             st.divider()
             
-            # Filtro e Agrupamento
-            df_devs = df_fin[df_fin["Valor"] > 0].copy() # Só quem tem dívida gerada
-            df_pend = df_devs[df_devs["Pago"] == False]  # Só quem não pagou
+            # Correção Definitiva do Groupby
+            df_devs = df_fin[df_fin["Valor"] > 0].copy()
+            df_pend = df_devs[df_devs["Pago"] == False].copy()
             
             if not df_pend.empty:
-                lista = df_pend.groupby("Time")["Valor"].sum().sort_values(ascending=False).to_frame(name="Devendo")
-                st.dataframe(lista.style.format("R$ {:.2f}").background_gradient(cmap="Reds"), use_container_width=True)
+                # Agrupa e renomeia explicitamente para evitar Series sem nome
+                lista = df_pend.groupby("Time")["Valor"].sum().reset_index()
+                lista.columns = ["Time", "Devendo"]
+                lista = lista.sort_values("Devendo", ascending=False)
+                
+                st.dataframe(lista.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
             else:
                 st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
