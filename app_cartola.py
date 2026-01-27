@@ -31,10 +31,23 @@ def configurar_estilo():
                 font-size: 0.75rem;
                 color: #888;
                 text-align: right;
-                margin-bottom: 5px;
+                margin-top: -5px;
             }
 
-            /* Estilo do Disquete Fixo */
+            /* Container do botão Admin alinhado totalmente à direita */
+            .admin-container {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+            }
+
+            /* Força o Popover a abrir para a esquerda para não cortar na borda */
+            div[data-testid="stPopover"] div[data-testid="stPopoverBody"] {
+                right: 0 !important;
+                left: auto !important;
+            }
+
+            /* Estilo do Disquete Fixo no canto superior direito */
             @keyframes fade_save {
                 0% { opacity: 0; transform: translateY(-20px); }
                 20% { opacity: 1; transform: translateY(0); }
@@ -72,7 +85,6 @@ def verificar_senha():
 def conectar_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # Tenta secrets do Streamlit Cloud primeiro
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     except:
@@ -89,12 +101,15 @@ def conectar_gsheets():
 def carregar_dados():
     sheet = conectar_gsheets()
     if sheet:
-        data = sheet.get_all_records()
-        if data:
-            df = pd.DataFrame(data)
-            if "Pago" in df.columns:
-                df["Pago"] = df["Pago"].apply(lambda x: str(x).upper() == "TRUE")
-            return df
+        try:
+            data = sheet.get_all_records()
+            if data:
+                df = pd.DataFrame(data)
+                if "Pago" in df.columns:
+                    df["Pago"] = df["Pago"].apply(lambda x: str(x).upper() == "TRUE")
+                return df
+        except:
+            pass
     return pd.DataFrame(columns=["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"])
 
 def salvar_dados(df):
@@ -123,7 +138,6 @@ def calcular_logica(df_ranking, df_hist, rodada):
     qtd_pagantes = math.ceil(total_participantes * PCT_PAGANTES)
     ranking = df_ranking.sort_values(by="Pontos", ascending=True).reset_index(drop=True)
     
-    # Busca histórico real para limite
     contagem = pd.Series(dtype=int)
     if not df_hist.empty:
         hist_passado = df_hist[(df_hist["Rodada"] != rodada) & (df_hist["Valor"] > 0)]
@@ -141,13 +155,13 @@ def calcular_logica(df_ranking, df_hist, rodada):
             salvos.append({"Data": datetime.now().strftime("%Y-%m-%d"), "Rodada": rodada, "Time": time, "Valor": 0.0, "Pago": True, "Motivo": "Salvo", "Pontos": pontos})
     return devedores, imunes, salvos, total_participantes, qtd_pagantes
 
-# --- TOPO COMPACTO ---
-col_tit, col_adm = st.columns([4, 1])
+# --- TOPO REESTRUTURADO ---
+col_tit, col_adm = st.columns([3, 1])
 with col_tit:
     st.title("⚽ Os Piá do Cartola")
 with col_adm:
+    st.markdown('<div class="admin-container">', unsafe_allow_html=True)
     if not st.session_state['admin_unlocked']:
-        # Botão pequeno no canto
         with st.popover("🔒 Admin"):
             st.text_input("Senha:", type="password", key="input_senha", on_change=verificar_senha)
         st.markdown("<div class='user-status'>Cartoleiro</div>", unsafe_allow_html=True)
@@ -156,6 +170,7 @@ with col_adm:
             st.session_state['admin_unlocked'] = False
             st.rerun()
         st.markdown("<div class='user-status' style='color:green'><b>ADMIN</b></div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- CARREGA DADOS ---
 df_fin = carregar_dados()
@@ -243,23 +258,21 @@ with tab_admin:
         if f:
             try:
                 x = pd.read_excel(f)
-                # Limpa nomes de colunas
                 x.columns = [str(c).strip().title() for c in x.columns]
-                # Padroniza para encontrar as colunas certas
-                x = x.rename(columns={"Pontuação": "Pontos", "Nome": "Time"})
+                x = x.rename(columns={"Pontuação": "Pontos", "Nome": "Time", "Participante": "Time"})
                 if "Time" in x.columns:
                     st.session_state['dados_live'] = x[["Time", "Pontos"]] if "Pontos" in x.columns else x
                     st.success("Planilha carregada!")
-            except: st.error("Erro ao ler colunas. Use 'Time' e 'Pontos'.")
+            except: st.error("Erro ao ler colunas.")
             
         st.session_state['dados_live'] = st.data_editor(st.session_state['dados_live'], num_rows="dynamic", use_container_width=True)
 
     if not st.session_state['dados_live'].empty:
         st.divider()
         d, i, s, t, p = calcular_logica(st.session_state['dados_live'], df_fin, rod)
-        st.write(f"**Resultado:** {p} pagantes calculados de {t} times.")
+        st.write(f"**Resultado:** {p} pagantes calculados.")
         
         if st.button("🚀 Confirmar e Enviar para Nuvem"):
             df_l = df_fin[df_fin["Rodada"] != rod]
             df_final = pd.concat([df_l, pd.DataFrame(d + i + s)], ignore_index=True)
-            salvar_dados(df_final); mostrar_disquete(); st.success("Dados enviados ao Google Sheets!"); time.sleep(1.5); st.rerun()
+            salvar_dados(df_final); mostrar_disquete(); st.success("Enviado com sucesso!"); time.sleep(1.5); st.rerun()
