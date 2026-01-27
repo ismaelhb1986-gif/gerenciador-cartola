@@ -2,75 +2,118 @@ import streamlit as st
 import pandas as pd
 import requests
 import math
-import os
-import random
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
+import time
 
 # --- CONFIGURAÇÕES ---
-ARQUIVO_DEBITOS = "controle_financeiro.csv"
 VALOR_RODADA = 7.00
 LIMITE_MAX_PAGAMENTOS = 10
 PCT_PAGANTES = 0.25
 SLUG_LIGA_PADRAO = "os-pia-do-cartola"
+SENHA_ADMIN = "c@rtol@2026"
+NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026" # Crie uma planilha com este nome exato
 
-# --- CSS: LAYOUT COMPACTO & NOTIFICAÇÃO FIXA ---
-def configurar_estilo_visual():
+# --- CONFIGURAÇÃO VISUAL ---
+st.set_page_config(page_title="Gestão Cartola", layout="wide")
+
+def configurar_estilo():
     st.markdown("""
         <style>
-               /* Remove margens do topo */
-               .block-container {
-                    padding-top: 1.5rem;
-                    padding-bottom: 1rem;
-                }
-               /* Compacta textos e tabelas */
-               h1 { font-size: 1.8rem !important; margin-bottom: 0rem !important; }
-               div[data-testid="stDataEditor"] table { font-size: 0.9rem; }
-               td, th { padding: 4px !important; }
-               
-               /* Animação do Disquete (FIXO NA TELA) */
-               @keyframes fade_in_right {
-                   0% { opacity: 0; transform: translateX(20px); }
-                   20% { opacity: 1; transform: translateX(0); }
-                   80% { opacity: 1; transform: translateX(0); }
-                   100% { opacity: 0; transform: translateX(20px); }
-               }
-               
-               .icon-save {
-                   position: fixed; /* Fixo em relação à janela do navegador */
-                   top: 80px;       /* Distância do topo (abaixo do cabeçalho do Streamlit) */
-                   right: 30px;     /* Distância da direita */
-                   font-size: 3.5rem;
-                   z-index: 999999; /* Garante que fique POR CIMA de tudo */
-                   pointer-events: none;
-                   animation: fade_in_right 2.5s ease-in-out forwards;
-                   filter: drop-shadow(2px 2px 4px rgba(0,0,0,0.3));
-               }
+            .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+            .stButton button { width: 100%; }
+            /* Esconde menu padrão do Streamlit */
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            
+            /* Status Login */
+            .user-status {
+                font-size: 0.8rem;
+                color: #666;
+                text-align: right;
+                padding-bottom: 10px;
+            }
         </style>
     """, unsafe_allow_html=True)
 
-# --- FUNÇÃO VISUAL: FEEDBACK DE SALVAMENTO ---
-def mostrar_disquete():
-    """Mostra um disquete fixo no canto superior direito da tela visível."""
-    st.markdown('<div class="icon-save">💾</div>', unsafe_allow_html=True)
+configurar_estilo()
 
-# --- FUNÇÕES DE ARQUIVO ---
-def carregar_dados():
-    if os.path.exists(ARQUIVO_DEBITOS):
-        df = pd.read_csv(ARQUIVO_DEBITOS)
-        df["Pago"] = df["Pago"].astype(bool)
-        df["Valor"] = df["Valor"].fillna(0.0).astype(float)
-        return df
+# --- AUTENTICAÇÃO E SESSÃO ---
+if 'admin_unlocked' not in st.session_state:
+    st.session_state['admin_unlocked'] = False
+
+def verificar_senha():
+    """Callback para verificar senha"""
+    if st.session_state.get('input_senha') == SENHA_ADMIN:
+        st.session_state['admin_unlocked'] = True
+        st.session_state['erro_senha'] = False
     else:
-        return pd.DataFrame(columns=["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"])
+        st.session_state['erro_senha'] = True
+
+def logout():
+    st.session_state['admin_unlocked'] = False
+
+# --- GOOGLE SHEETS CONEXÃO ---
+@st.cache_resource
+def conectar_gsheets():
+    """Conecta ao Google Sheets usando st.secrets ou arquivo local"""
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    
+    try:
+        # Tenta pegar dos Segredos do Streamlit Cloud
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    except:
+        # Fallback: Tenta arquivo local (para você testar no PC)
+        # Renomeie seu arquivo JSON baixado para "credentials.json"
+        try:
+            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        except Exception as e:
+            st.error(f"Erro de Credenciais: {e}. Configure os Secrets ou o arquivo JSON.")
+            return None
+
+    client = gspread.authorize(creds)
+    try:
+        sheet = client.open(NOME_PLANILHA_GOOGLE).sheet1
+        return sheet
+    except gspread.exceptions.SpreadsheetNotFound:
+        st.error(f"Planilha '{NOME_PLANILHA_GOOGLE}' não encontrada! Crie ela no seu Drive e compartilhe com o email do bot.")
+        return None
+
+def carregar_dados():
+    sheet = conectar_gsheets()
+    if sheet:
+        data = sheet.get_all_records()
+        if data:
+            df = pd.DataFrame(data)
+            # Converte tipos
+            if "Pago" in df.columns:
+                df["Pago"] = df["Pago"].astype(bool) # Google Sheets salva como TRUE/FALSE texto
+            if "Valor" in df.columns:
+                df["Valor"] = pd.to_numeric(df["Valor"]).fillna(0.0)
+            return df
+    return pd.DataFrame(columns=["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"])
 
 def salvar_dados(df):
-    colunas = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"]
-    for col in colunas:
-        if col not in df.columns:
-            df[col] = None
-    df[colunas].to_csv(ARQUIVO_DEBITOS, index=False)
+    sheet = conectar_gsheets()
+    if sheet:
+        # Prepara DF para envio (converte bool para string compatível json/sheets se necessário, mas gspread lida bem)
+        # Garante colunas
+        colunas = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"]
+        for col in colunas:
+            if col not in df.columns:
+                df[col] = ""
+        
+        # Converte booleanos explicitamente para evitar erros
+        df_save = df[colunas].copy()
+        df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x else "FALSE")
+        
+        # Limpa e reescreve (método update bruto, mas seguro para volumes pequenos)
+        sheet.clear()
+        sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
-# --- FUNÇÕES DO CARTOLA ---
+# --- LÓGICA DO CARTOLA (Mantida) ---
 def buscar_api(slug):
     url = f"https://api.cartola.globo.com/ligas/{slug}"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -140,95 +183,62 @@ def calcular_logica(df_ranking, df_hist, rodada):
             
     return devedores, imunes, salvos, total_participantes, qtd_pagantes
 
-# --- INTERFACE ---
-st.set_page_config(page_title="Gestão Cartola", layout="wide")
-configurar_estilo_visual()
+# --- FEEDBACK VISUAL ---
+def mostrar_disquete():
+    st.markdown("""
+        <style>
+        @keyframes fade { 0% {opacity:0; top:-50px;} 20% {opacity:1; top:20px;} 80% {opacity:1; top:20px;} 100% {opacity:0; top:-50px;} }
+        .save-icon { position:fixed; left:50%; transform:translateX(-50%); top:-50px; font-size:3rem; z-index:9999; animation: fade 2.5s forwards; }
+        </style>
+        <div class="save-icon">💾</div>
+    """, unsafe_allow_html=True)
 
-st.title("⚽ Os Piá do Cartola")
+# --- BARRA DE TOPO (LOGIN) ---
+col_t1, col_t2 = st.columns([4, 1])
 
-df_fin = carregar_dados()
+with col_t1:
+    st.title("⚽ Os Piá do Cartola")
 
-tab1, tab2, tab3 = st.tabs(["🚀 Lançamento", "📋 Resumo Geral", "💰 Controle de Pendências"])
-
-# --- TAB 1: LANÇAMENTO AUTOMÁTICO ---
-with tab1:
-    c1, c2 = st.columns([2, 1])
-    modo = c1.radio("Fonte:", ["Excel / Manual", "API Cartola"], horizontal=True)
-    rodada = c2.number_input("Rodada Nº", 1, 38, 1)
-    
-    if 'dados_live' not in st.session_state:
-        st.session_state['dados_live'] = pd.DataFrame([{"Time": "Exemplo", "Pontos": 0.0}])
-
-    if modo == "API Cartola":
-        slug = st.text_input("Slug da Liga", SLUG_LIGA_PADRAO)
-        if st.button("Buscar na API"):
-            with st.spinner("Buscando..."):
-                res_api = buscar_api(slug)
-                if res_api is not None: 
-                    st.session_state['dados_live'] = res_api
-                    st.rerun()
-                else: st.error("Erro ao buscar dados.")
+with col_t2:
+    if not st.session_state['admin_unlocked']:
+        # Modo Cartoleiro (Default)
+        with st.popover("🔒 Acessar Admin"):
+            st.text_input("Senha Admin:", type="password", key="input_senha", on_change=verificar_senha)
+            if st.session_state.get('erro_senha'):
+                st.error("Senha incorreta")
+        st.markdown("<div class='user-status'>Modo: <b>Cartoleiro</b> (Leitura)</div>", unsafe_allow_html=True)
     else:
-        file = st.file_uploader("Solte o Excel aqui (.xlsx)", ["xlsx"])
-        if file:
-            try:
-                df_excel = pd.read_excel(file)
-                df_excel.columns = [c.strip().capitalize() for c in df_excel.columns]
-                st.session_state['dados_live'] = df_excel
-            except Exception as e: st.error(f"Erro no Excel: {e}")
-        
-        st.caption("Edite os dados abaixo e o resultado atualizará automaticamente:")
-        st.session_state['dados_live'] = st.data_editor(
-            st.session_state['dados_live'], 
-            num_rows="dynamic", 
-            use_container_width=True, 
-            height=200,
-            key="editor_lancamento"
-        )
-
-    if not st.session_state['dados_live'].empty:
-        st.divider()
-        if not df_fin.empty and rodada in df_fin["Rodada"].values:
-            st.warning(f"⚠️ Rodada {rodada} já existe. Ao confirmar, será SUBSTITUÍDA.")
-            
-        devedores, imunes, salvos, total, pagantes = calcular_logica(st.session_state['dados_live'], df_fin, rodada)
-        
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Participantes", total)
-        k2.metric("Pagantes (25%)", pagantes)
-        k3.metric("Imunes (>10x)", len(imunes))
-        
-        st.write("##### 📉 Quem deve pagar:")
-        df_show = pd.DataFrame(devedores)
-        if not df_show.empty:
-            df_show.index += 1
-            st.dataframe(df_show[["Time", "Pontos", "Valor"]], use_container_width=True)
-        else:
-            st.success("Ninguém paga nesta rodada!")
-
-        if st.button("✅ Confirmar e Salvar Rodada"):
-            df_limpo = df_fin[df_fin["Rodada"] != rodada]
-            todos_registros = devedores + imunes + salvos
-            df_final = pd.concat([df_limpo, pd.DataFrame(todos_registros)], ignore_index=True)
-            salvar_dados(df_final)
-            
-            mostrar_disquete()
-            st.toast("Rodada salva!")
-            
-            import time
-            time.sleep(1.5)
+        # Modo Admin
+        if st.button("Sair do Admin"):
+            logout()
             st.rerun()
+        st.markdown("<div class='user-status' style='color:green;'>Modo: <b>ADMINISTRADOR</b> (Edição)</div>", unsafe_allow_html=True)
 
-# --- TAB 2: RESUMO GERAL ---
-with tab2:
-    st.header("Resumo Geral (Ordem Alfabética)")
+# --- CARREGA DADOS ---
+# Adiciona um loader visual
+with st.spinner("Sincronizando com Google Sheets..."):
+    df_fin = carregar_dados()
+
+# --- TABS (ORDEM SOLICITADA: RESUMO PRIMEIRO) ---
+tab_resumo, tab_pendencias, tab_admin = st.tabs(["📋 Resumo Geral", "💰 Controle de Pendências", "⚙️ Área Admin"])
+
+# ==============================================================================
+# ABA 1: RESUMO GERAL (MATRIZ) - ABERTA PARA TODOS, MAS EDIÇÃO RESTRITA
+# ==============================================================================
+with tab_resumo:
+    st.caption("Visão geral de todas as rodadas.")
     
     if not df_fin.empty:
+        # Prepara Matriz
         todos_times = df_fin["Time"].unique()
         df_view = df_fin.copy()
-        df_view.loc[df_view["Valor"] == 0, "Pago"] = None
         
-        matrix = df_view.pivot_table(index="Time", columns="Rodada", values="Pago", aggfunc="last")
+        # Visualização: Transforma valores para Bool ou None
+        df_view["Pago_View"] = df_view.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
+        
+        matrix = df_view.pivot_table(index="Time", columns="Rodada", values="Pago_View", aggfunc="last")
+        
+        # Contagem
         dividas_reais = df_fin[df_fin["Valor"] > 0]
         contagem = dividas_reais["Time"].value_counts().rename("Vezes")
         
@@ -236,78 +246,79 @@ with tab2:
         df_display = df_display.join(contagem).fillna(0).astype(int)
         df_display = df_display.join(matrix)
         
+        # Coluna Status
         df_display.insert(0, "Status", df_display["Vezes"].apply(
             lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"
         ))
         
-        rodadas_cols = []
+        # Garante colunas
         for i in range(1, 20):
             if i not in df_display.columns: df_display[i] = None
-            rodadas_cols.append(i)
-        
+            
         df_display.index.name = "Time"
-        df_display = df_display.reset_index()
-        df_display = df_display.sort_values(by="Time", ascending=True)
+        df_display = df_display.reset_index().sort_values("Time")
 
+        # Config Colunas
         cfg = {
             "Time": st.column_config.TextColumn("Time", width="medium", disabled=True),
             "Status": st.column_config.TextColumn("Status", width="small", disabled=True),
             "Vezes": st.column_config.NumberColumn("#", width="small", disabled=True),
         }
         for i in range(1, 20):
-            cfg[str(i)] = st.column_config.CheckboxColumn(f"{i}", width="small")
-            
-        st.caption("Legenda: **Vazio** = Salvo | **☐** = Deve | **☑** = Pago")
-        
+            # AQUI ESTÁ A MÁGICA: disabled=True se não for admin
+            cfg[str(i)] = st.column_config.CheckboxColumn(
+                f"{i}", 
+                width="small", 
+                disabled=not st.session_state['admin_unlocked'] 
+            )
+
+        # Editor
         df_editado = st.data_editor(
-            df_display, 
+            df_display,
             column_config=cfg,
-            height=600, 
+            height=600,
             use_container_width=True,
-            hide_index=True 
+            hide_index=True
         )
 
-        try:
-            if "Time" not in df_editado.columns:
-                df_editado = df_editado.reset_index()
-            
-            cols_nums = [c for c in df_editado.columns if str(c).isdigit()]
-            
-            df_melt = df_editado.melt(
-                id_vars=["Time"], 
-                value_vars=cols_nums,
-                var_name="Rodada", 
-                value_name="Novo_Status"
-            )
-            df_melt = df_melt.dropna(subset=["Novo_Status"])
-            
-            if not df_melt.empty:
-                mudou = False
-                for _, row in df_melt.iterrows():
-                    mask = (df_fin["Time"] == row["Time"]) & \
-                           (df_fin["Rodada"] == int(row["Rodada"])) & \
-                           (df_fin["Valor"] > 0)
-                    
-                    if mask.any():
-                        idx = df_fin[mask].index[0]
-                        if bool(df_fin.at[idx, "Pago"]) != bool(row["Novo_Status"]):
-                            df_fin.at[idx, "Pago"] = bool(row["Novo_Status"])
-                            mudou = True
+        # SALVAMENTO (SÓ EXECUTA SE FOR ADMIN)
+        if st.session_state['admin_unlocked']:
+            try:
+                if "Time" not in df_editado.columns: df_editado = df_editado.reset_index()
+                cols_nums = [c for c in df_editado.columns if str(c).isdigit()]
+                df_melt = df_editado.melt(id_vars=["Time"], value_vars=cols_nums, var_name="Rodada", value_name="Novo_Status")
+                df_melt = df_melt.dropna(subset=["Novo_Status"])
                 
-                if mudou:
-                    salvar_dados(df_fin)
-                    mostrar_disquete()
-                    import time
-                    time.sleep(1)
-                    st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao salvar: {e}")
+                if not df_melt.empty:
+                    mudou = False
+                    # Compara com DF original
+                    for _, row in df_melt.iterrows():
+                        mask = (df_fin["Time"] == row["Time"]) & (df_fin["Rodada"] == int(row["Rodada"])) & (df_fin["Valor"] > 0)
+                        if mask.any():
+                            idx = df_fin[mask].index[0]
+                            # Verifica se o estado mudou
+                            if bool(df_fin.at[idx, "Pago"]) != bool(row["Novo_Status"]):
+                                df_fin.at[idx, "Pago"] = bool(row["Novo_Status"])
+                                mudou = True
+                    
+                    if mudou:
+                        salvar_dados(df_fin)
+                        mostrar_disquete()
+                        time.sleep(1)
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao salvar: {e}")
+        else:
+            # Se tentar editar sem ser admin (visual warning, embora esteja disabled)
+            pass
 
     else:
-        st.info("Nenhum dado encontrado. Faça o lançamento da Rodada 1.")
+        st.info("Nenhum dado. Peça ao Admin para lançar a Rodada 1.")
 
-# --- TAB 3: CONTROLE DE PENDÊNCIAS ---
-with tab3:
+# ==============================================================================
+# ABA 2: PENDÊNCIAS - APENAS LEITURA PARA TODOS
+# ==============================================================================
+with tab_pendencias:
     if not df_fin.empty:
         total_pago = df_fin[(df_fin["Valor"] > 0) & (df_fin["Pago"] == True)]["Valor"].sum()
         total_aberto = df_fin[(df_fin["Valor"] > 0) & (df_fin["Pago"] == False)]["Valor"].sum()
@@ -315,7 +326,7 @@ with tab3:
         k1, k2, k3 = st.columns(3)
         k1.metric("💰 Arrecadado", f"R$ {total_pago:.2f}")
         k2.metric("🔴 A Receber", f"R$ {total_aberto:.2f}", delta=-total_aberto)
-        k3.metric("Última Rodada", df_fin["Rodada"].max())
+        k3.metric("Última Rodada", df_fin["Rodada"].max() if pd.notna(df_fin["Rodada"].max()) else 0)
         
         st.divider()
         
@@ -323,17 +334,76 @@ with tab3:
             Pendentes=("Pago", lambda x: (~x).sum()),
             Valor_Aberto=("Valor", lambda x: x[~df_fin.loc[x.index, "Pago"]].sum())
         )
+        devedores = resumo[resumo["Valor_Aberto"] > 0].sort_values("Valor_Aberto", ascending=False)
         
-        devedores_reais = resumo[resumo["Valor_Aberto"] > 0].sort_values("Valor_Aberto", ascending=False)
-        
-        if not devedores_reais.empty:
-            st.subheader("🚨 Ranking de Devedores")
-            st.dataframe(
-                devedores_reais.style.format({"Valor_Aberto": "R$ {:.2f}"})
-                               .background_gradient(cmap="Reds"),
-                use_container_width=True
-            )
+        if not devedores.empty:
+            st.dataframe(devedores.style.format({"Valor_Aberto": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
         else:
-            st.success("Todos em dia! 🏆")
+            st.success("Tudo em dia!")
     else:
         st.info("Sem dados.")
+
+# ==============================================================================
+# ABA 3: ÁREA ADMIN - PROTEGIDA
+# ==============================================================================
+with tab_admin:
+    if not st.session_state['admin_unlocked']:
+        st.warning("⚠️ Esta área é restrita. Faça login no canto superior direito.")
+        st.stop() # Para a execução aqui se não for admin
+    
+    st.subheader("⚙️ Lançamento de Rodada")
+    
+    c1, c2 = st.columns([2, 1])
+    modo = c1.radio("Fonte:", ["Excel / Manual", "API Cartola"], horizontal=True)
+    rodada = c2.number_input("Rodada Nº", 1, 38, 1)
+    
+    if 'dados_live' not in st.session_state:
+        st.session_state['dados_live'] = pd.DataFrame([{"Time": "Exemplo", "Pontos": 0.0}])
+
+    # INPUTS
+    if modo == "API Cartola":
+        slug = st.text_input("Slug da Liga", SLUG_LIGA_PADRAO)
+        if st.button("Buscar API"):
+            res = buscar_api(slug)
+            if res is not None: 
+                st.session_state['dados_live'] = res
+                st.rerun()
+            else: st.error("Erro API")
+    else:
+        file = st.file_uploader("Excel (.xlsx)", ["xlsx"])
+        if file:
+            try:
+                x = pd.read_excel(file)
+                x.columns = [c.capitalize().strip() for c in x.columns]
+                st.session_state['dados_live'] = x
+            except: pass
+        
+        st.session_state['dados_live'] = st.data_editor(st.session_state['dados_live'], num_rows="dynamic", use_container_width=True, height=200)
+
+    # CÁLCULO E SALVAMENTO
+    if not st.session_state['dados_live'].empty:
+        st.divider()
+        if not df_fin.empty and rodada in df_fin["Rodada"].values:
+            st.warning(f"⚠️ Rodada {rodada} será substituída!")
+            
+        devs, imunes, salvos, tot, pag = calcular_logica(st.session_state['dados_live'], df_fin, rodada)
+        
+        cols = st.columns(3)
+        cols[0].metric("Participantes", tot)
+        cols[1].metric("Pagantes", pag)
+        cols[2].metric("Valor", f"R$ {VALOR_RODADA:.2f}")
+        
+        st.write("Quem paga:")
+        st.dataframe(pd.DataFrame(devs)[["Time", "Pontos", "Valor"]] if devs else pd.DataFrame(), use_container_width=True)
+        
+        if st.button("✅ Confirmar Lançamento"):
+            # Limpa rodada antiga e salva nova
+            df_limpo = df_fin[df_fin["Rodada"] != rodada]
+            todos = devs + imunes + salvos
+            df_final = pd.concat([df_limpo, pd.DataFrame(todos)], ignore_index=True)
+            
+            salvar_dados(df_final)
+            mostrar_disquete()
+            st.success("Salvo no Google Sheets!")
+            time.sleep(1.5)
+            st.rerun()
