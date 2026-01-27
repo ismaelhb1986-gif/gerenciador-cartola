@@ -18,7 +18,7 @@ NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
 
 COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"]
 
-# --- 2. CONFIGURAÇÃO VISUAL ---
+# --- 2. SETUP VISUAL ---
 st.set_page_config(page_title="Gestão Cartola PRO", layout="wide", page_icon="⚽")
 
 def configurar_css():
@@ -48,20 +48,18 @@ def verificar_senha():
     else:
         st.toast("⛔ Senha incorreta!", icon="❌")
 
-# --- 4. FUNÇÕES DE DADOS (SANITIZAÇÃO TOTAL) ---
+# --- 4. FUNÇÕES DE DADOS (SANITIZAÇÃO) ---
 
 def limpar_nan(df):
-    """Remove NaNs e Infs que quebram o Streamlit e o Google Sheets"""
-    # Substitui inf por NaN
-    df = df.replace([np.inf, -np.inf], np.nan)
-    # Preenche NaN numéricos com 0.0
-    num_cols = df.select_dtypes(include=[np.number]).columns
-    df[num_cols] = df[num_cols].fillna(0)
-    # Preenche o resto com string vazia
-    df = df.fillna("")
+    """Limpa NaNs apenas onde é seguro, sem estragar a lógica de exibição"""
+    # Para colunas numéricas (exceto as que usamos para lógica visual), zerar é ok
+    if "Valor" in df.columns:
+        df["Valor"] = df["Valor"].fillna(0.0)
+    if "Rodada" in df.columns:
+        df["Rodada"] = df["Rodada"].fillna(0)
     return df
 
-@st.cache_resource(ttl=0) # TTL 0 para forçar recarga sempre
+@st.cache_resource(ttl=0)
 def conectar_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
@@ -93,16 +91,14 @@ def carregar_dados():
         df.columns = [str(c).strip() for c in df.columns]
 
         # Filtro Anti-Duplicidade
-        if "Time" in df.columns:
-            df = df[df["Time"].astype(str) != "Time"]
-        if "Valor" in df.columns:
-            df = df[df["Valor"].astype(str) != "Valor"]
+        if "Time" in df.columns: df = df[df["Time"].astype(str) != "Time"]
+        if "Valor" in df.columns: df = df[df["Valor"].astype(str) != "Valor"]
 
         # Garante colunas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
-        # Tipagem Forte com Tratamento de Erro
+        # Tipagem Forte
         if "Valor" in df.columns:
             df["Valor"] = pd.to_numeric(
                 df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False),
@@ -113,30 +109,27 @@ def carregar_dados():
             df["Rodada"] = pd.to_numeric(df["Rodada"], errors='coerce').fillna(0).astype(int)
             
         if "Pago" in df.columns:
-            # Converte tudo para string antes de comparar para evitar erro de tipo
             df["Pago"] = df["Pago"].astype(str).str.upper().apply(lambda x: True if x in ["TRUE", "VERDADEIRO", "SIM", "1"] else False)
 
         df = limpar_nan(df)
         return df, "Sucesso"
     except Exception as e:
-        # Retorna DF vazio mas mostra o erro no console se precisar
-        print(f"Erro Carregamento: {e}")
         return pd.DataFrame(columns=COLUNAS_ESPERADAS), f"Erro Leitura: {e}"
 
 def salvar_dados(df):
     sheet = conectar_gsheets()
     if sheet:
-        # Prepara DF
+        # Garante que Nulos virem string vazia ou zero antes de ir pro Google
         df_save = df.reindex(columns=COLUNAS_ESPERADAS).copy()
-        df_save = limpar_nan(df_save)
         
-        # Conversão explícita para primitivos Python (JSON safe)
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
-        df_save["Data"] = df_save["Data"].astype(str)
-        df_save["Valor"] = df_save["Valor"].apply(lambda x: float(x))
-        df_save["Rodada"] = df_save["Rodada"].apply(lambda x: int(x) if x != "" else 0)
+        df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
+        df_save["Valor"] = df_save["Valor"].fillna(0.0)
+        df_save["Rodada"] = df_save["Rodada"].fillna(0).astype(int)
         
-        # Limpa e Salva
+        # Substitui qualquer NaN restante por string vazia para não quebrar a API
+        df_save = df_save.fillna("")
+        
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
@@ -156,10 +149,7 @@ def calcular(df_ranking, df_hist, rod):
     
     conta = pd.Series(dtype=int)
     if not df_hist.empty and "Rodada" in df_hist.columns and "Valor" in df_hist.columns:
-        validos = df_hist[
-            (df_hist["Rodada"] != rod) & 
-            (df_hist["Valor"] > 0)
-        ]
+        validos = df_hist[(df_hist["Rodada"] != rod) & (df_hist["Valor"] > 0)]
         if not validos.empty: conta = validos["Time"].value_counts()
     
     devs, imune, salvos = [], [], []
@@ -193,7 +183,7 @@ df_fin, status_msg = carregar_dados()
 # ORDEM DAS ABAS
 tab_admin, tab_resumo, tab_pendencias = st.tabs(["⚙️ Painel Admin", "📋 Resumo", "💰 Pendências"])
 
-# --- ABA 1: ADMIN ---
+# --- ABA ADMIN ---
 with tab_admin:
     if not st.session_state['admin_unlocked']: 
         st.warning("🔒 Área restrita. Faça login no canto superior direito para lançar rodadas.")
@@ -229,7 +219,6 @@ with tab_admin:
                     cols = ["Time", "Pontos"] if col_p else ["Time"]
                     st.session_state['temp'] = x[cols]
                     if not col_p: st.session_state['temp']["Pontos"] = 0.0
-                    # Sanitiza o Excel importado também
                     st.session_state['temp'] = limpar_nan(st.session_state['temp'])
                 else: st.error(f"Não achei coluna Time. Tem: {list(x.columns)}")
             except Exception as e: st.error(f"Erro Excel: {e}")
@@ -239,7 +228,6 @@ with tab_admin:
     if not st.session_state['temp'].empty and "Time" in st.session_state['temp'].columns:
         if "Pontos" not in st.session_state['temp'].columns: st.session_state['temp']["Pontos"] = 0.0
         
-        # Bloco Try/Except para capturar erro no cálculo e exibí-lo limpo
         try:
             d, i, s, t, p = calcular(st.session_state['temp'], df_fin, rod)
             st.info(f"Simulação: {p} pagantes de {t} times.")
@@ -256,69 +244,90 @@ with tab_admin:
                 time.sleep(2)
                 st.rerun()
         except Exception as e:
-            st.error(f"Erro no cálculo ou salvamento: {e}")
+            st.error(f"Erro cálculo: {e}")
 
-# --- ABA 2: RESUMO ---
+# --- ABA RESUMO ---
 with tab_resumo:
     valid_db = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns
     
     if valid_db:
         try:
             df_v = df_fin.copy()
-            # Garante que não tem Nulos antes de pivotar
-            df_v = limpar_nan(df_v)
-            
+            # LÓGICA VISUAL: None = Sem checkbox. False/True = Checkbox.
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
             
-            # Pivot com fill_value=None para evitar NaNs feios
+            # Pivot table (com valores None preservados)
             matrix = df_v.pivot_table(index="Time", columns="Rodada", values="V", aggfunc="last")
             
             cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
-            disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int).join(matrix)
+            
+            # Join: Cuidado para não preencher os Nones da matrix com 0
+            disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int)
+            disp = disp.join(matrix) # Faz o join da matrix depois para manter os Nones
+            
             disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
             
-            # Sanitiza de novo para garantir
-            disp = disp.fillna(False) # Preenche checkboxes vazios com False ou None dependendo da logica
+            # Ordenação
+            disp.index.name = "Time"
+            disp = disp.reset_index().sort_values("Time")
             
-            for i in range(1, 20): 
-                if i not in disp.columns: disp[i] = None
+            # Configuração das Colunas
+            cfg = {"Time": st.column_config.TextColumn(disabled=True), 
+                   "Status": st.column_config.TextColumn(width="small", disabled=True), 
+                   "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)}
             
-            disp.index.name = "Time"; disp = disp.reset_index().sort_values("Time")
-            
-            cfg = {"Time": st.column_config.TextColumn(disabled=True), "Status": st.column_config.TextColumn(width="small", disabled=True), "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)}
-            for i in range(1, 20): cfg[str(i)] = st.column_config.CheckboxColumn(f"{i}", width="small", disabled=not st.session_state['admin_unlocked'])
+            # Configura checkboxes para as rodadas
+            rodadas_cols = [c for c in disp.columns if str(c).isdigit()]
+            for c in rodadas_cols:
+                cfg[str(c)] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
             edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
             
             if st.session_state['admin_unlocked']:
-                m = edit.melt(id_vars=["Time"], value_vars=[c for c in edit.columns if str(c).isdigit()], var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
+                m = edit.melt(id_vars=["Time"], value_vars=rodadas_cols, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
                 if not m.empty:
                     change = False
                     for _, r in m.iterrows():
                         mask = (df_fin["Time"]==r["Time"]) & (df_fin["Rodada"]==int(r["Rodada"])) & (df_fin["Valor"]>0)
                         if mask.any():
                             idx = df_fin[mask].index[0]
-                            # Verifica se o valor mudou (cast para bool para garantir)
                             if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
                                 df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
                     if change: salvar_dados(df_fin); st.toast("✅ Salvo!", icon="☁️"); time.sleep(1); st.rerun()
         except Exception as e: 
-            st.error(f"Erro Visualização (Resumo): {e}")
+            st.error(f"Erro Visualização: {e}")
     else: st.info("Banco de dados vazio.")
 
-# --- ABA 3: PENDÊNCIAS ---
+# --- ABA PENDÊNCIAS ---
 with tab_pendencias:
     if valid_db:
         try:
-            pg = df_fin[df_fin["Pago"]==True]["Valor"].sum()
-            ab = df_fin[df_fin["Pago"]==False]["Valor"].sum()
+            # CORREÇÃO AQUI: Filtra explicitamente antes de somar
+            pg = df_fin[(df_fin["Pago"] == True) & (df_fin["Valor"] > 0)]["Valor"].sum()
+            ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
+            
             c1, c2, c3 = st.columns(3)
-            c1.metric("Pago", f"R$ {pg:.2f}"); c2.metric("Aberto", f"R$ {ab:.2f}"); c3.metric("Rodadas", int(df_fin["Rodada"].max()) if "Rodada" in df_fin.columns else 0)
+            c1.metric("Pago", f"R$ {pg:.2f}")
+            c2.metric("Aberto", f"R$ {ab:.2f}")
+            c3.metric("Rodadas", int(df_fin["Rodada"].max()) if "Rodada" in df_fin.columns and df_fin["Rodada"].max() > 0 else 0)
+            
             st.divider()
-            devs = df_fin[df_fin["Valor"]>0].groupby("Time").agg(Devendo=("Valor", lambda x: x[~df_fin.loc[x.index, "Pago"]].sum()))
-            lista = devs[devs["Devendo"]>0].sort_values("Devendo", ascending=False)
-            if not lista.empty: st.dataframe(lista.style.format("R$ {:.2f}").background_gradient(cmap="Reds"), use_container_width=True)
-            else: st.success("Ninguém devendo!")
+            
+            # CORREÇÃO AQUI: Groupby seguro
+            # 1. Filtra apenas quem tem valor a pagar > 0
+            df_devs = df_fin[df_fin["Valor"] > 0].copy()
+            # 2. Filtra apenas quem NÃO pagou
+            df_pendentes = df_devs[df_devs["Pago"] == False]
+            
+            if not df_pendentes.empty:
+                # 3. Agrupa e soma
+                lista = df_pendentes.groupby("Time")["Valor"].sum().sort_values(ascending=False)
+                
+                # Formata para exibição
+                df_exibicao = pd.DataFrame(lista).rename(columns={"Valor": "Devendo"})
+                st.dataframe(df_exibicao.style.format("R$ {:.2f}").background_gradient(cmap="Reds"), use_container_width=True)
+            else:
+                st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
-            st.error(f"Erro Visualização (Pendências): {e}")
+            st.error(f"Erro Pendências: {e}")
     else: st.info("Sem dados.")
