@@ -14,7 +14,7 @@ PCT_PAGANTES = 0.25
 SLUG_LIGA_PADRAO = "os-pia-do-cartola"
 SENHA_ADMIN = "c@rtol@2026"
 NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
-TOTAL_RODADAS_TURNO = 19  # Define o tamanho fixo da tabela (Turno)
+TOTAL_RODADAS_TURNO = 19
 
 COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"]
 
@@ -189,8 +189,15 @@ with tab_resumo:
             
             # --- PADRONIZAÇÃO VISUAL (1 a 19) ---
             todas_rodadas = [str(i) for i in range(1, TOTAL_RODADAS_TURNO + 1)]
-            # Reindex força que as colunas 1..19 existam. Colunas sem dados viram NaN (None)
+            
+            # Reindex força colunas. Aqui cria NaN (float)
             matrix = matrix.reindex(columns=todas_rodadas)
+
+            # --- CORREÇÃO DO BUG DE FLOAT VS CHECKBOX ---
+            # Converte tudo para Object para aceitar None e remover Floats
+            matrix = matrix.astype(object)
+            # Onde for NaN (float), vira None. O resto mantém True/False
+            matrix = matrix.where(pd.notnull(matrix), None)
 
             cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
             
@@ -224,6 +231,7 @@ with tab_resumo:
                         mask = (df_fin["Time"]==r["Time"]) & (df_fin["Rodada"]==int(r["Rodada"])) & (df_fin["Valor"]>0)
                         if mask.any():
                             idx = df_fin[mask].index[0]
+                            # Compara garantindo booleano
                             if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
                                 df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
                     if change: salvar_dados(df_fin); st.toast("✅ Atualizado!", icon="☁️"); time.sleep(1); st.rerun()
@@ -249,15 +257,17 @@ with tab_pendencias:
             
             st.divider()
             
-            # Filtro Seguro
             df_devs = df_fin[(df_fin["Valor"] > 0) & (df_fin["Pago"] == False)].copy()
             
             if not df_devs.empty:
-                # Agrupamento seguro com nomes definidos
                 tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
                 tabela_dev = tabela_dev.sort_values("Devendo", ascending=False)
                 
-                st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
+                # Tenta usar background_gradient, se falhar (sem matplotlib), exibe normal
+                try:
+                    st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
+                except:
+                    st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}), use_container_width=True)
             else:
                 st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
