@@ -232,13 +232,23 @@ with tab_pendencias:
                 # Ajusta para começar em 1
                 tabela_dev.index = tabela_dev.index + 1
                 
+                # CÁLCULO DA ALTURA DINÂMICA
+                # (Num Linhas + 1 do cabeçalho) * 35px + 3px de margem
+                altura_dinamica = (len(tabela_dev) + 1) * 35 + 3
+
                 # Layout compacto (1/3 tabela, 2/3 vazio)
                 col_tab, col_vazio = st.columns([1, 2])
                 with col_tab:
                     try:
-                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"))
+                        st.dataframe(
+                            tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"),
+                            height=altura_dinamica # Força altura
+                        )
                     except:
-                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}))
+                        st.dataframe(
+                            tabela_dev.style.format({"Devendo": "R$ {:.2f}"}),
+                            height=altura_dinamica
+                        )
             else:
                 st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
