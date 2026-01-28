@@ -114,14 +114,51 @@ def salvar_dados(df):
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
-# --- 5. LÓGICA DE CÁLCULO ---
+# --- 5. LÓGICA DE CÁLCULO E API ---
 def buscar_api(slug):
+    url = f"https://api.cartola.globo.com/ligas/{slug}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'application/json'
+    }
+    
     try:
-        resp = requests.get(f"https://api.cartola.globo.com/ligas/{slug}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        resp = requests.get(url, headers=headers, timeout=10)
+        
         if resp.status_code == 200:
-            return pd.DataFrame([{"Time": t['nome'], "Pontos": t['pontos']['rodada'] or 0.0} for t in resp.json()['times']])
-    except: pass
-    return None
+            data = resp.json()
+            if 'times' not in data:
+                return None, f"Estrutura inesperada. Chaves: {list(data.keys())}"
+            
+            times_data = data['times']
+            if not times_data:
+                return None, "Lista de times vazia."
+
+            lista_formatada = []
+            for t in times_data:
+                try:
+                    nome = t.get('nome', 'Sem Nome')
+                    raw_pontos = t.get('pontos', 0)
+                    pontos = 0.0
+                    
+                    if isinstance(raw_pontos, dict):
+                        pontos = raw_pontos.get('rodada', 0.0)
+                    elif isinstance(raw_pontos, (int, float)):
+                        pontos = float(raw_pontos)
+                    
+                    if pontos is None: pontos = 0.0
+                    lista_formatada.append({"Time": nome, "Pontos": pontos})
+                except: continue
+
+            if not lista_formatada: return None, "Nenhum time processável."
+            return pd.DataFrame(lista_formatada), None
+            
+        elif resp.status_code == 404: return None, "Liga não encontrada (Verifique o Slug)."
+        elif resp.status_code == 403: return None, "Acesso negado (Liga Privada?)"
+        else: return None, f"Erro HTTP {resp.status_code}"
+            
+    except requests.exceptions.Timeout: return None, "Timeout (API lenta)."
+    except Exception as e: return None, f"Erro Técnico: {str(e)}"
 
 def calcular(df_ranking, df_hist, rod):
     if df_ranking.empty: return [], [], [], 0, 0
@@ -208,7 +245,7 @@ with tab_resumo:
         except Exception as e: st.error(f"Erro Visualização Resumo: {e}")
     else: st.info("Banco de dados vazio. Aguardando lançamentos do Admin.")
 
-# --- ABA 2: PENDÊNCIAS (ATUALIZADO) ---
+# --- ABA 2: PENDÊNCIAS ---
 with tab_pendencias:
     if valid_db:
         try:
@@ -227,28 +264,20 @@ with tab_pendencias:
             
             if not df_devs.empty:
                 tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
-                # Ordena e reseta o index
                 tabela_dev = tabela_dev.sort_values("Devendo", ascending=False).reset_index(drop=True)
-                # Ajusta para começar em 1
                 tabela_dev.index = tabela_dev.index + 1
                 
-                # CÁLCULO DA ALTURA DINÂMICA
-                # (Num Linhas + 1 do cabeçalho) * 35px + 3px de margem
                 altura_dinamica = (len(tabela_dev) + 1) * 35 + 3
 
-                # Layout compacto (1/3 tabela, 2/3 vazio)
                 col_tab, col_vazio = st.columns([1, 2])
                 with col_tab:
                     try:
                         st.dataframe(
                             tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"),
-                            height=altura_dinamica # Força altura
-                        )
-                    except:
-                        st.dataframe(
-                            tabela_dev.style.format({"Devendo": "R$ {:.2f}"}),
                             height=altura_dinamica
                         )
+                    except:
+                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}), height=altura_dinamica)
             else:
                 st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
@@ -273,11 +302,17 @@ with tab_admin:
     if 'temp' not in st.session_state: st.session_state['temp'] = pd.DataFrame(columns=["Time", "Pontos"])
     
     if origem == "API":
-        slug = st.text_input("Slug", SLUG_LIGA_PADRAO)
-        if st.button("Buscar API"):
-            r = buscar_api(slug)
-            if r is not None: st.session_state['temp'] = r; st.rerun()
-            else: st.error("Erro API")
+        slug = st.text_input("Slug da Liga", SLUG_LIGA_PADRAO)
+        st.caption("Nota: Ligas privadas podem falhar sem autenticação avançada.")
+        if st.button("Buscar API", type="primary"):
+            with st.spinner("Conectando..."):
+                df_api, erro_msg = buscar_api(slug)
+                if df_api is not None:
+                    st.session_state['temp'] = df_api
+                    st.success(f"Sucesso! {len(df_api)} times.")
+                    time.sleep(1); st.rerun()
+                else:
+                    st.error(f"Falha: {erro_msg}")
     else:
         f = st.file_uploader("Excel", ["xlsx"])
         if f:
