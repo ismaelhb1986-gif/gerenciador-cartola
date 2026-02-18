@@ -106,20 +106,44 @@ def salvar_dados(df):
     sheet = conectar_gsheets()
     if sheet:
         df_save = df.reindex(columns=COLUNAS_ESPERADAS).copy()
+        
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
         df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
         df_save["Valor"] = df_save["Valor"].fillna(0.0)
         df_save["Rodada"] = df_save["Rodada"].fillna(0).astype(int)
+        
         df_save = df_save.fillna("")
+        
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
-# --- 5. LÓGICA DE CÁLCULO ---
+# --- 5. LÓGICA DE CÁLCULO E IMPORTAÇÃO ---
 def buscar_api(slug):
+    """
+    Substituído cirurgicamente pela inteligência do auth_teste.py
+    Não altera absolutamente nada no layout do resto da aplicação.
+    """
     try:
-        resp = requests.get(f"https://api.cartola.globo.com/ligas/{slug}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-        if resp.status_code == 200:
-            return pd.DataFrame([{"Time": t['nome'], "Pontos": t['pontos']['rodada'] or 0.0} for t in resp.json()['times']])
+        token = st.secrets["cartola"]["token"].strip()
+        url = f"https://api.cartola.globo.com/auth/liga/{slug}"
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        }
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            dados = response.json()
+            if dados and 'times' in dados:
+                df_bruto = pd.DataFrame(dados['times'])
+                df_export = pd.DataFrame()
+                
+                # Mapeia Cartoleiro para Time e Posição para Pontos (conforme sua regra do teste)
+                df_export['Time'] = df_bruto['nome_cartola']
+                df_export['Pontos'] = df_bruto['ranking'].apply(lambda x: float(x.get('rodada')) if isinstance(x, dict) else 999.0)
+                
+                # Ordenando pela posição da rodada (do 1º em diante)
+                df_export = df_export.sort_values(by='Pontos', ascending=True).reset_index(drop=True)
+                return df_export
     except: pass
     return None
 
@@ -166,21 +190,26 @@ tab_resumo, tab_pendencias, tab_admin = st.tabs(["📋 Resumo", "💰 Pendência
 # --- ABA 1: RESUMO ---
 with tab_resumo:
     valid_db = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns
+    
     if valid_db:
         try:
             df_v = df_fin.copy()
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
+            
             df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
+            
             matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
+            
             todas_rodadas = [str(i) for i in range(1, TOTAL_RODADAS_TURNO + 1)]
             matrix = matrix.reindex(columns=todas_rodadas)
-            matrix = matrix.astype(object)
-            matrix = matrix.where(pd.notnull(matrix), None)
 
             cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
+            
             disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int)
             disp = disp.join(matrix)
+            
             disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
+            
             disp.index.name = "Time"
             disp = disp.reset_index().sort_values("Time")
             
@@ -189,6 +218,7 @@ with tab_resumo:
                 "Status": st.column_config.TextColumn(width="small", disabled=True),
                 "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)
             }
+            
             for c in todas_rodadas:
                 cfg[c] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
@@ -205,16 +235,20 @@ with tab_resumo:
                             if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
                                 df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
                     if change: salvar_dados(df_fin); st.toast("✅ Atualizado!", icon="☁️"); time.sleep(1); st.rerun()
-        except Exception as e: st.error(f"Erro Visualização Resumo: {e}")
+        except Exception as e: 
+            st.error(f"Erro Visualização Resumo: {e}")
     else: st.info("Banco de dados vazio. Aguardando lançamentos do Admin.")
 
-# --- ABA 2: PENDÊNCIAS (ATUALIZADO) ---
+# --- ABA 2: PENDÊNCIAS ---
 with tab_pendencias:
     if valid_db:
         try:
             pg = df_fin[(df_fin["Pago"] == True) & (df_fin["Valor"] > 0)]["Valor"].sum()
             ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
-            max_rod = int(df_fin["Rodada"].max()) if not df_fin["Rodada"].empty else 0
+            
+            max_rod = 0
+            if not df_fin["Rodada"].empty:
+                max_rod = int(df_fin["Rodada"].max())
 
             c1, c2, c3 = st.columns(3)
             c1.metric("Pago", f"R$ {pg:.2f}")
@@ -227,18 +261,9 @@ with tab_pendencias:
             
             if not df_devs.empty:
                 tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
-                # Ordena e reseta o index
-                tabela_dev = tabela_dev.sort_values("Devendo", ascending=False).reset_index(drop=True)
-                # Ajusta para começar em 1
-                tabela_dev.index = tabela_dev.index + 1
+                tabela_dev = tabela_dev.sort_values("Devendo", ascending=False)
                 
-                # Layout compacto (1/3 tabela, 2/3 vazio)
-                col_tab, col_vazio = st.columns([1, 2])
-                with col_tab:
-                    try:
-                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"))
-                    except:
-                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}))
+                st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
             else:
                 st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
