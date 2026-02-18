@@ -53,9 +53,11 @@ def verificar_senha():
 def conectar_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
+        # Lê as credenciais do bloco [gcp_service_account] do secrets.toml
         if "gcp_service_account" in st.secrets:
             creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
         else:
+            # Fallback para local (caso ainda use arquivo json em dev)
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
         client = gspread.authorize(creds)
         return client.open(NOME_PLANILHA_GOOGLE).sheet1
@@ -121,24 +123,23 @@ def salvar_dados(df):
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
-# --- 5. LÓGICA DE CÁLCULO E API (COM PROTEÇÃO DE ERRO) ---
+# --- 5. LÓGICA DE CÁLCULO E API (INTEGRAÇÃO AUTH_TESTE) ---
 
 def buscar_api(slug):
     """
-    Busca dados da API usando Token Bearer.
-    Inclui verificação de segurança para não travar se os Secrets não existirem.
+    Função atualizada para usar a autenticação do auth_teste.py
+    Lê o token do bloco [cartola] nos Secrets.
     """
     try:
-        # PROTEÇÃO: Verifica se a configuração existe antes de tentar ler
-        if "cartola" not in st.secrets:
-            st.error("⚠️ Configuração [cartola] não encontrada nos Secrets!")
-            return None
-            
-        if "token" not in st.secrets["cartola"]:
-            st.error("⚠️ Token do Cartola não encontrado nos Secrets!")
+        # Verifica se as chaves existem para evitar crash
+        if "cartola" not in st.secrets or "token" not in st.secrets["cartola"]:
+            st.error("⚠️ Configuração de Token [cartola] não encontrada nos Secrets.")
             return None
 
+        # Pega o token configurado
         token = st.secrets["cartola"]["token"]
+        
+        # URL Autenticada (Mesma do auth_teste.py)
         url = f"https://api.cartola.globo.com/auth/liga/{slug}"
         
         headers = {
@@ -146,6 +147,7 @@ def buscar_api(slug):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
         }
         
+        # Faz a requisição
         resp = requests.get(url, headers=headers, timeout=10)
         
         if resp.status_code == 200:
@@ -154,21 +156,32 @@ def buscar_api(slug):
             
             lista_final = []
             for t in times_data:
+                # Extrai dados conforme a estrutura da API
                 nome = t.get('nome', 'Sem Nome')
-                pontos = t.get('pontos', {}).get('rodada', 0.0)
+                
+                # Tenta pegar pontos.rodada, se não existir assume 0.0
+                pontos_obj = t.get('pontos')
+                if isinstance(pontos_obj, dict):
+                    pontos = pontos_obj.get('rodada', 0.0)
+                else:
+                    pontos = 0.0
+                
                 if pontos is None: pontos = 0.0
                 
                 lista_final.append({
                     "Time": nome, 
                     "Pontos": float(pontos)
                 })
-                
+            
+            # Retorna DataFrame pronto para o app
             return pd.DataFrame(lista_final)
+        
         else:
-            st.error(f"Erro API ({resp.status_code}): Verifique o Token ou o Slug.")
+            st.error(f"Erro na API ({resp.status_code}): Verifique se o Token expirou ou se o Slug está correto.")
             return None
+            
     except Exception as e:
-        st.error(f"Erro técnico API: {e}")
+        st.error(f"Erro técnico ao buscar API: {e}")
         return None
 
 def calcular(df_ranking, df_hist, rod):
@@ -209,7 +222,7 @@ with st.container():
 
 df_fin, status_msg = carregar_dados()
 
-# --- ORDEM FINAL: RESUMO -> PENDÊNCIAS -> ADMIN ---
+# ORDEM DAS ABAS: Resumo -> Pendências -> Admin (Conforme solicitado anteriormente)
 tab_resumo, tab_pendencias, tab_admin = st.tabs(["📋 Resumo", "💰 Pendências", "⚙️ Painel Admin"])
 
 # --- ABA 1: RESUMO ---
@@ -220,6 +233,8 @@ with tab_resumo:
         try:
             df_v = df_fin.copy()
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
+            
+            # Garante rodada como string
             df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
             
             matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
@@ -238,7 +253,6 @@ with tab_resumo:
             disp.index.name = "Time"
             disp = disp.reset_index().sort_values("Time")
             
-            # Configuração das Colunas
             cfg = {
                 "Time": st.column_config.TextColumn(disabled=True),
                 "Status": st.column_config.TextColumn(width="small", disabled=True),
@@ -289,10 +303,10 @@ with tab_pendencias:
                 tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
                 tabela_dev = tabela_dev.sort_values("Devendo", ascending=False)
                 
-                # CORREÇÃO DE LAYOUT: use_container_width=True OBRIGATÓRIO
+                # GARANTE LAYOUT PREENCHIDO
                 st.dataframe(
                     tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), 
-                    use_container_width=True, 
+                    use_container_width=True,
                     hide_index=True
                 )
             else:
@@ -321,12 +335,9 @@ with tab_admin:
     if origem == "API":
         slug = st.text_input("Slug", SLUG_LIGA_PADRAO)
         if st.button("Buscar API"):
-            # Verifica se está configurado antes de chamar
-            if "cartola" in st.secrets:
+            with st.spinner("Conectando com API autenticada..."):
                 r = buscar_api(slug)
                 if r is not None: st.session_state['temp'] = r; st.rerun()
-            else:
-                st.error("⚠️ Configure os Secrets com [cartola] antes de usar a API.")
     else:
         f = st.file_uploader("Excel", ["xlsx"])
         if f:
