@@ -121,16 +121,21 @@ def salvar_dados(df):
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
-# --- 5. LÓGICA DE CÁLCULO E API ---
+# --- 5. LÓGICA DE CÁLCULO E API (COM PROTEÇÃO DE ERRO) ---
 
 def buscar_api(slug):
     """
-    Função atualizada para usar Token e Autenticação (Igual ao auth_teste.py)
+    Busca dados da API usando Token Bearer.
+    Inclui verificação de segurança para não travar se os Secrets não existirem.
     """
     try:
-        # Verifica se o token existe nos secrets
-        if "cartola" not in st.secrets or "token" not in st.secrets["cartola"]:
-            st.error("Erro: Token do Cartola não configurado nos Secrets.")
+        # PROTEÇÃO: Verifica se a configuração existe antes de tentar ler
+        if "cartola" not in st.secrets:
+            st.error("⚠️ Configuração [cartola] não encontrada nos Secrets!")
+            return None
+            
+        if "token" not in st.secrets["cartola"]:
+            st.error("⚠️ Token do Cartola não encontrado nos Secrets!")
             return None
 
         token = st.secrets["cartola"]["token"]
@@ -149,14 +154,8 @@ def buscar_api(slug):
             
             lista_final = []
             for t in times_data:
-                # Extrai nome
                 nome = t.get('nome', 'Sem Nome')
-                
-                # Extrai pontos da rodada (tenta pegar pontos -> rodada)
-                # O Cartola as vezes muda a estrutura, mas geralmente é isso:
                 pontos = t.get('pontos', {}).get('rodada', 0.0)
-                
-                # Se vier None, assume 0.0
                 if pontos is None: pontos = 0.0
                 
                 lista_final.append({
@@ -220,18 +219,13 @@ with tab_resumo:
     if valid_db:
         try:
             df_v = df_fin.copy()
-            # Lógica Visual: None = Sem checkbox | True/False = Checkbox
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
-            
-            # Garante que rodada é string para o pivot funcionar
             df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
             
-            # Pivot dos dados existentes
             matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
             
-            # --- PADRONIZAÇÃO VISUAL (1 a 19) ---
+            # Padronização Visual 1-19
             todas_rodadas = [str(i) for i in range(1, TOTAL_RODADAS_TURNO + 1)]
-            # Reindex força que as colunas 1..19 existam. Colunas sem dados viram NaN (None)
             matrix = matrix.reindex(columns=todas_rodadas)
 
             cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
@@ -251,13 +245,11 @@ with tab_resumo:
                 "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)
             }
             
-            # Configura checkboxes para TODAS as 19 colunas
             for c in todas_rodadas:
                 cfg[c] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
             edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
             
-            # Salvamento
             if st.session_state['admin_unlocked']:
                 m = edit.melt(id_vars=["Time"], value_vars=todas_rodadas, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
                 if not m.empty:
@@ -297,7 +289,12 @@ with tab_pendencias:
                 tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
                 tabela_dev = tabela_dev.sort_values("Devendo", ascending=False)
                 
-                st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
+                # CORREÇÃO DE LAYOUT: use_container_width=True OBRIGATÓRIO
+                st.dataframe(
+                    tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), 
+                    use_container_width=True, 
+                    hide_index=True
+                )
             else:
                 st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
@@ -324,9 +321,12 @@ with tab_admin:
     if origem == "API":
         slug = st.text_input("Slug", SLUG_LIGA_PADRAO)
         if st.button("Buscar API"):
-            r = buscar_api(slug)
-            if r is not None: st.session_state['temp'] = r; st.rerun()
-            else: st.error("Erro API")
+            # Verifica se está configurado antes de chamar
+            if "cartola" in st.secrets:
+                r = buscar_api(slug)
+                if r is not None: st.session_state['temp'] = r; st.rerun()
+            else:
+                st.error("⚠️ Configure os Secrets com [cartola] antes de usar a API.")
     else:
         f = st.file_uploader("Excel", ["xlsx"])
         if f:
