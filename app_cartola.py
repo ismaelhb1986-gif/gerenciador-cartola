@@ -53,9 +53,11 @@ def verificar_senha():
 def conectar_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
+        # Tenta ler do secrets (Nuvem)
         if "gcp_service_account" in st.secrets:
             creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
         else:
+            # Fallback local
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
         client = gspread.authorize(creds)
         return client.open(NOME_PLANILHA_GOOGLE).sheet1
@@ -80,12 +82,15 @@ def carregar_dados():
         df = pd.DataFrame(data)
         df.columns = [str(c).strip() for c in df.columns]
 
+        # Filtro Anti-Duplicidade
         if "Time" in df.columns: df = df[df["Time"].astype(str) != "Time"]
         if "Valor" in df.columns: df = df[df["Valor"].astype(str) != "Valor"]
 
+        # Garante colunas mínimas
         for col in COLUNAS_ESPERADAS:
             if col not in df.columns: df[col] = None
             
+        # Conversão de Tipos Segura
         if "Valor" in df.columns:
             df["Valor"] = pd.to_numeric(
                 df["Valor"].astype(str).str.replace("R$", "", regex=False).str.replace(",", ".", regex=False),
@@ -106,22 +111,77 @@ def salvar_dados(df):
     sheet = conectar_gsheets()
     if sheet:
         df_save = df.reindex(columns=COLUNAS_ESPERADAS).copy()
+        
         df_save["Pago"] = df_save["Pago"].apply(lambda x: "TRUE" if x is True else "FALSE")
         df_save["Data"] = df_save["Data"].astype(str).replace("nan", "")
         df_save["Valor"] = df_save["Valor"].fillna(0.0)
         df_save["Rodada"] = df_save["Rodada"].fillna(0).astype(int)
+        
+        # Preenche vazios para não quebrar API
         df_save = df_save.fillna("")
+        
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
-# --- 5. LÓGICA DE CÁLCULO ---
+# --- 5. LÓGICA DE CÁLCULO E API ---
+
 def buscar_api(slug):
+    """
+    IMPORTAÇÃO ISOLADA E MAPEADA:
+    - Time (no App) <--- Recebe 'nome_cartola' (da API)
+    - Pontos (no App) <--- Recebe 'ranking.rodada' (da API)
+    """
     try:
-        resp = requests.get(f"https://api.cartola.globo.com/ligas/{slug}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        # 1. Verifica Segredos
+        if "cartola" not in st.secrets or "token" not in st.secrets["cartola"]:
+            st.error("⚠️ Token não configurado em [cartola] nos Secrets.")
+            return None
+
+        # 2. Configura Requisição
+        token = st.secrets["cartola"]["token"]
+        url = f"https://api.cartola.globo.com/auth/liga/{slug}"
+        
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+        }
+        
+        # 3. Busca Dados
+        resp = requests.get(url, headers=headers, timeout=10)
+        
         if resp.status_code == 200:
-            return pd.DataFrame([{"Time": t['nome'], "Pontos": t['pontos']['rodada'] or 0.0} for t in resp.json()['times']])
-    except: pass
-    return None
+            data = resp.json()
+            times_data = data.get('times', [])
+            
+            lista_mapeada = []
+            
+            for t in times_data:
+                # REGRA 1: Tratar o Time como Cartoleiro
+                nome_para_usar = t.get('nome_cartola', t.get('nome', 'Sem Nome'))
+                
+                # REGRA 2: Tratar a Posição como Pontuação
+                ranking = t.get('ranking', {})
+                if isinstance(ranking, dict):
+                    posicao = ranking.get('rodada', 0)
+                else:
+                    posicao = 0
+                
+                if posicao is None: posicao = 0
+                
+                # Cria a estrutura exata que o app espera
+                lista_mapeada.append({
+                    "Time": nome_para_usar,   # Aqui vai o Cartoleiro
+                    "Pontos": float(posicao)  # Aqui vai a Posição
+                })
+                
+            return pd.DataFrame(lista_mapeada)
+        else:
+            st.error(f"Erro API ({resp.status_code}).")
+            return None
+            
+    except Exception as e:
+        st.error(f"Erro na importação: {e}")
+        return None
 
 def calcular(df_ranking, df_hist, rod):
     if df_ranking.empty: return [], [], [], 0, 0
@@ -161,39 +221,54 @@ with st.container():
 
 df_fin, status_msg = carregar_dados()
 
+# --- ORDEM FINAL: RESUMO -> PENDÊNCIAS -> ADMIN ---
 tab_resumo, tab_pendencias, tab_admin = st.tabs(["📋 Resumo", "💰 Pendências", "⚙️ Painel Admin"])
 
 # --- ABA 1: RESUMO ---
 with tab_resumo:
     valid_db = not df_fin.empty and "Time" in df_fin.columns and "Valor" in df_fin.columns
+    
     if valid_db:
         try:
             df_v = df_fin.copy()
+            # Lógica Visual: None = Sem checkbox | True/False = Checkbox
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
+            
+            # Garante que rodada é string para o pivot funcionar
             df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
+            
+            # Pivot dos dados existentes
             matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
+            
+            # --- PADRONIZAÇÃO VISUAL (1 a 19) ---
             todas_rodadas = [str(i) for i in range(1, TOTAL_RODADAS_TURNO + 1)]
+            # Reindex força que as colunas 1..19 existam. Colunas sem dados viram NaN (None)
             matrix = matrix.reindex(columns=todas_rodadas)
-            matrix = matrix.astype(object)
-            matrix = matrix.where(pd.notnull(matrix), None)
 
             cobrancas = df_fin[df_fin["Valor"] > 0]["Time"].value_counts().rename("Cobranças")
+            
             disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int)
             disp = disp.join(matrix)
+            
             disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
+            
             disp.index.name = "Time"
             disp = disp.reset_index().sort_values("Time")
             
+            # Configuração das Colunas
             cfg = {
                 "Time": st.column_config.TextColumn(disabled=True),
                 "Status": st.column_config.TextColumn(width="small", disabled=True),
                 "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)
             }
+            
+            # Configura checkboxes para TODAS as 19 colunas
             for c in todas_rodadas:
                 cfg[c] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
             edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
             
+            # Salvamento
             if st.session_state['admin_unlocked']:
                 m = edit.melt(id_vars=["Time"], value_vars=todas_rodadas, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
                 if not m.empty:
@@ -205,16 +280,20 @@ with tab_resumo:
                             if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
                                 df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
                     if change: salvar_dados(df_fin); st.toast("✅ Atualizado!", icon="☁️"); time.sleep(1); st.rerun()
-        except Exception as e: st.error(f"Erro Visualização Resumo: {e}")
+        except Exception as e: 
+            st.error(f"Erro Visualização Resumo: {e}")
     else: st.info("Banco de dados vazio. Aguardando lançamentos do Admin.")
 
-# --- ABA 2: PENDÊNCIAS (ATUALIZADO) ---
+# --- ABA 2: PENDÊNCIAS ---
 with tab_pendencias:
     if valid_db:
         try:
             pg = df_fin[(df_fin["Pago"] == True) & (df_fin["Valor"] > 0)]["Valor"].sum()
             ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
-            max_rod = int(df_fin["Rodada"].max()) if not df_fin["Rodada"].empty else 0
+            
+            max_rod = 0
+            if not df_fin["Rodada"].empty:
+                max_rod = int(df_fin["Rodada"].max())
 
             c1, c2, c3 = st.columns(3)
             c1.metric("Pago", f"R$ {pg:.2f}")
@@ -227,18 +306,9 @@ with tab_pendencias:
             
             if not df_devs.empty:
                 tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
-                # Ordena e reseta o index
-                tabela_dev = tabela_dev.sort_values("Devendo", ascending=False).reset_index(drop=True)
-                # Ajusta para começar em 1
-                tabela_dev.index = tabela_dev.index + 1
+                tabela_dev = tabela_dev.sort_values("Devendo", ascending=False)
                 
-                # Layout compacto (1/3 tabela, 2/3 vazio)
-                col_tab, col_vazio = st.columns([1, 2])
-                with col_tab:
-                    try:
-                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"))
-                    except:
-                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}))
+                st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"), use_container_width=True)
             else:
                 st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
@@ -265,9 +335,9 @@ with tab_admin:
     if origem == "API":
         slug = st.text_input("Slug", SLUG_LIGA_PADRAO)
         if st.button("Buscar API"):
-            r = buscar_api(slug)
-            if r is not None: st.session_state['temp'] = r; st.rerun()
-            else: st.error("Erro API")
+            with st.spinner("Conectando API..."):
+                r = buscar_api(slug)
+                if r is not None: st.session_state['temp'] = r; st.rerun()
     else:
         f = st.file_uploader("Excel", ["xlsx"])
         if f:
