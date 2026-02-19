@@ -16,7 +16,8 @@ SENHA_ADMIN = "c@rtol@2026"
 NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
 TOTAL_RODADAS_TURNO = 19
 
-COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Pontos"]
+# Alterado de "Pontos" para "Posição"
+COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Posição"]
 
 # --- 2. SETUP VISUAL ---
 st.set_page_config(page_title="Gestão Cartola PRO", layout="wide", page_icon="⚽")
@@ -80,6 +81,10 @@ def carregar_dados():
         df = pd.DataFrame(data)
         df.columns = [str(c).strip() for c in df.columns]
 
+        # Migração segura: Se existir a coluna antiga "Pontos", renomeia para "Posição"
+        if "Pontos" in df.columns and "Posição" not in df.columns:
+            df.rename(columns={"Pontos": "Posição"}, inplace=True)
+
         if "Time" in df.columns: df = df[df["Time"].astype(str) != "Time"]
         if "Valor" in df.columns: df = df[df["Valor"].astype(str) != "Valor"]
 
@@ -138,11 +143,14 @@ def buscar_api(slug):
                 
                 df_export = pd.DataFrame()
                 df_export['Time'] = df_bruto['nome_cartola']
-                df_export['Pontos'] = df_bruto['ranking'].apply(
+                
+                # Mapeado para Posição
+                df_export['Posição'] = df_bruto['ranking'].apply(
                     lambda x: float(x.get('rodada')) if isinstance(x, dict) else 999.0
                 )
                 
-                df_export = df_export.sort_values(by='Pontos', ascending=True).reset_index(drop=True)
+                # Para exibir bonito na tela, do 1º ao último
+                df_export = df_export.sort_values(by='Posição', ascending=True).reset_index(drop=True)
                 
                 return df_export
             return None
@@ -159,7 +167,9 @@ def calcular(df_ranking, df_hist, rod):
     # AJUSTE: Arredondamento matemático padrão
     qtd = int((len(df_ranking) * PCT_PAGANTES) + 0.5)
     
-    rank = df_ranking.sort_values("Pontos").reset_index(drop=True)
+    # AJUSTE CRUCIAL: Maior Posição = Pior. Então ordenamos DECRESCENTE (ascending=False)
+    # Assim, o 41º, 40º, 39º ficam no topo da lista para serem cobrados.
+    rank = df_ranking.sort_values("Posição", ascending=False).reset_index(drop=True)
     
     conta = pd.Series(dtype=int)
     if not df_hist.empty and "Rodada" in df_hist.columns and "Valor" in df_hist.columns:
@@ -168,14 +178,14 @@ def calcular(df_ranking, df_hist, rod):
     
     devs, imune, salvos = [], [], []
     for _, r in rank.iterrows():
-        t, p = r['Time'], r['Pontos']
+        t, p = r['Time'], r['Posição']
         if len(devs) < qtd:
             if conta.get(t, 0) < LIMITE_MAX_PAGAMENTOS:
-                devs.append({"Data": datetime.now().strftime("%Y-%m-%d"), "Rodada": rod, "Time": t, "Valor": VALOR_RODADA, "Pago": False, "Motivo": "Lanterna", "Pontos": p})
+                devs.append({"Data": datetime.now().strftime("%Y-%m-%d"), "Rodada": rod, "Time": t, "Valor": VALOR_RODADA, "Pago": False, "Motivo": "Lanterna", "Posição": p})
             else:
-                imune.append({"Data": datetime.now().strftime("%Y-%m-%d"), "Rodada": rod, "Time": t, "Valor": 0.0, "Pago": True, "Motivo": "Imune (>10)", "Pontos": p})
+                imune.append({"Data": datetime.now().strftime("%Y-%m-%d"), "Rodada": rod, "Time": t, "Valor": 0.0, "Pago": True, "Motivo": "Imune (>10)", "Posição": p})
         else:
-            salvos.append({"Data": datetime.now().strftime("%Y-%m-%d"), "Rodada": rod, "Time": t, "Valor": 0.0, "Pago": True, "Motivo": "Salvo", "Pontos": p})
+            salvos.append({"Data": datetime.now().strftime("%Y-%m-%d"), "Rodada": rod, "Time": t, "Valor": 0.0, "Pago": True, "Motivo": "Salvo", "Posição": p})
     return devs, imune, salvos, len(df_ranking), qtd
 
 # --- 6. INTERFACE ---
@@ -293,7 +303,7 @@ with tab_admin:
     origem = c1.radio("Fonte:", ["Excel", "API"], horizontal=True)
     rod = c2.number_input("Rodada", 1, TOTAL_RODADAS_TURNO, 1)
     
-    if 'temp' not in st.session_state: st.session_state['temp'] = pd.DataFrame(columns=["Time", "Pontos"])
+    if 'temp' not in st.session_state: st.session_state['temp'] = pd.DataFrame(columns=["Time", "Posição"])
     
     if origem == "API":
         slug = st.text_input("Slug", SLUG_LIGA_PADRAO)
@@ -307,13 +317,14 @@ with tab_admin:
             try:
                 x = pd.read_excel(f)
                 x.columns = [str(c).strip().title() for c in x.columns]
-                mapa = {"Pontuação": "Pontos", "Pts": "Pontos", "Nome": "Time", "Participante": "Time", "Equipe": "Time", "Cartoleiro": "Time"}
+                # Adicionados mais mapeamentos caso a coluna venha com outros nomes do Excel
+                mapa = {"Pontuação": "Posição", "Pts": "Posição", "Pontos": "Posição", "Pos": "Posição", "Nome": "Time", "Participante": "Time", "Equipe": "Time", "Cartoleiro": "Time"}
                 x = x.rename(columns=mapa)
                 if "Time" in x.columns:
-                    col_p = "Pontos" if "Pontos" in x.columns else None
-                    cols = ["Time", "Pontos"] if col_p else ["Time"]
+                    col_p = "Posição" if "Posição" in x.columns else None
+                    cols = ["Time", "Posição"] if col_p else ["Time"]
                     st.session_state['temp'] = x[cols]
-                    if not col_p: st.session_state['temp']["Pontos"] = 0.0
+                    if not col_p: st.session_state['temp']["Posição"] = 0.0
                     st.session_state['temp'] = st.session_state['temp'].fillna(0)
                 else: st.error(f"Não achei coluna Time. Tem: {list(x.columns)}")
             except Exception as e: st.error(f"Erro Excel: {e}")
@@ -321,7 +332,7 @@ with tab_admin:
     st.session_state['temp'] = st.data_editor(st.session_state['temp'], num_rows="dynamic", use_container_width=True)
     
     if not st.session_state['temp'].empty and "Time" in st.session_state['temp'].columns:
-        if "Pontos" not in st.session_state['temp'].columns: st.session_state['temp']["Pontos"] = 0.0
+        if "Posição" not in st.session_state['temp'].columns: st.session_state['temp']["Posição"] = 0.0
         
         try:
             d, i, s, t, p = calcular(st.session_state['temp'], df_fin, rod)
