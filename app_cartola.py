@@ -155,7 +155,10 @@ def buscar_api(slug):
 
 def calcular(df_ranking, df_hist, rod):
     if df_ranking.empty: return [], [], [], 0, 0
-    qtd = math.ceil(len(df_ranking) * PCT_PAGANTES)
+    
+    # AJUSTE: Arredondamento matemático padrão
+    qtd = int((len(df_ranking) * PCT_PAGANTES) + 0.5)
+    
     rank = df_ranking.sort_values("Pontos").reset_index(drop=True)
     
     conta = pd.Series(dtype=int)
@@ -238,7 +241,7 @@ with tab_resumo:
         except Exception as e: st.error(f"Erro Visualização Resumo: {e}")
     else: st.info("Banco de dados vazio. Aguardando lançamentos do Admin.")
 
-# --- ABA 2: PENDÊNCIAS (ATUALIZADO) ---
+# --- ABA 2: PENDÊNCIAS ---
 with tab_pendencias:
     if valid_db:
         try:
