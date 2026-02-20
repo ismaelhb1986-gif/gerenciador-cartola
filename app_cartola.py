@@ -12,7 +12,8 @@ VALOR_RODADA = 7.00
 LIMITE_MAX_PAGAMENTOS = 10
 PCT_PAGANTES = 0.25
 SLUG_LIGA_PADRAO = "os-pia-do-cartola"
-SENHA_ADMIN = "c@rtol@2026"
+# 🔒 A senha agora vem do arquivo de segredos!
+SENHA_ADMIN = st.secrets["cartola"]["senha_admin"]
 NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
 NOME_ABA_DADOS = "Dados"
 NOME_ABA_CONFIG = "Config"
