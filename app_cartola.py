@@ -6,8 +6,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import time
-import os
-import json
 
 # --- 1. CONFIGURAÇÕES ---
 VALOR_RODADA = 7.00
@@ -16,6 +14,8 @@ PCT_PAGANTES = 0.25
 SLUG_LIGA_PADRAO = "os-pia-do-cartola"
 SENHA_ADMIN = "c@rtol@2026"
 NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
+NOME_ABA_DADOS = "Dados"
+NOME_ABA_CONFIG = "Config"
 TOTAL_RODADAS_TURNO = 19
 
 # Alterado de "Pontos" para "Posição"
@@ -61,7 +61,20 @@ def conectar_gsheets():
         else:
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
         client = gspread.authorize(creds)
-        return client.open(NOME_PLANILHA_GOOGLE).sheet1
+        # 🔒 Alterado para buscar pelo NOME exato da aba de dados
+        return client.open(NOME_PLANILHA_GOOGLE).worksheet(NOME_ABA_DADOS)
+    except: return None
+
+def conectar_planilha_config():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
+        else:
+            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        client = gspread.authorize(creds)
+        # 🔒 Busca pelo NOME exato da aba de config
+        return client.open(NOME_PLANILHA_GOOGLE).worksheet(NOME_ABA_CONFIG)
     except: return None
 
 def resetar_banco_dados():
@@ -122,20 +135,28 @@ def salvar_dados(df):
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
 # --- 5. LÓGICA DE CÁLCULO E API ---
-ARQUIVO_TOKENS = "cartola_tokens.json"
-
 def obter_refresh_token():
-    # Se já existe o arquivo de controle, lê o token novo de lá
-    if os.path.exists(ARQUIVO_TOKENS):
-        with open(ARQUIVO_TOKENS, "r") as f:
-            return json.load(f).get("refresh_token")
-    # Se não existe, puxa o "virgem" do secrets.toml
+    sheet_config = conectar_planilha_config()
+    if sheet_config:
+        try:
+            # Tenta ler a célula A2 da aba Config
+            token = sheet_config.cell(2, 1).value
+            if token and len(token) > 50:
+                return token.strip()
+        except:
+            pass
+    # Se a aba estiver vazia ou falhar, puxa o "virgem" do secrets.toml
     return st.secrets["cartola"]["refresh_token"].strip()
 
 def salvar_novo_refresh_token(novo_rt):
-    # Salva o token novo no HD para a próxima vez
-    with open(ARQUIVO_TOKENS, "w") as f:
-        json.dump({"refresh_token": novo_rt}, f)
+    sheet_config = conectar_planilha_config()
+    if sheet_config:
+        try:
+            # Salva na coluna A, linhas 1 e 2
+            sheet_config.update_acell(1, 1, 'RefreshToken_Atualizado')
+            sheet_config.update_acell(2, 1, novo_rt)
+        except Exception as e:
+            st.error(f"Erro ao salvar token na aba Config: {e}")
 
 def gerar_token_fresco():
     try:
@@ -151,18 +172,19 @@ def gerar_token_fresco():
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         }
         response = requests.post(url_auth, data=payload, headers=headers)
+        
         if response.status_code == 200:
             dados = response.json()
             novo_access = dados.get('access_token')
             novo_refresh = dados.get('refresh_token')
             
-            # ROTATIVIDADE: Se a Globo mandou um refresh token novo, a gente guarda!
+            # ROTATIVIDADE: Se a Globo mandou um refresh token novo, a gente guarda na Planilha!
             if novo_refresh and novo_refresh != refresh_token_atual:
                 salvar_novo_refresh_token(novo_refresh)
                 
             return novo_access
         else:
-            st.error(f"Erro na renovação do token. Código: {response.status_code}")
+            st.error(f"Erro na renovação do token na Globo. Código: {response.status_code}")
             return None
     except Exception as e:
         st.error(f"Erro interno na renovação do token: {e}")
@@ -174,10 +196,10 @@ def buscar_api(slug):
             st.error("⚠️ Refresh Token não configurado em [cartola] nos Secrets.")
             return None
 
-        # Gera o token válido por 1 hora sempre que clicar no botão, mantendo a rotação
+        # Gera o token válido e faz a rotação automática usando a Planilha
         token = gerar_token_fresco()
         if not token:
-            st.error("⚠️ O Refresh Token expirou ou é inválido. Atualize o arquivo secrets.toml com um novo.")
+            st.error("⚠️ O Refresh Token expirou ou é inválido. Atualize o arquivo secrets.toml.")
             return None
 
         url = f"https://api.cartola.globo.com/auth/liga/{slug}"
