@@ -6,6 +6,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import time
+import os
+import json
 
 # --- 1. CONFIGURAÇÕES ---
 VALOR_RODADA = 7.00
@@ -120,14 +122,29 @@ def salvar_dados(df):
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
 # --- 5. LÓGICA DE CÁLCULO E API ---
+ARQUIVO_TOKENS = "cartola_tokens.json"
+
+def obter_refresh_token():
+    # Se já existe o arquivo de controle, lê o token novo de lá
+    if os.path.exists(ARQUIVO_TOKENS):
+        with open(ARQUIVO_TOKENS, "r") as f:
+            return json.load(f).get("refresh_token")
+    # Se não existe, puxa o "virgem" do secrets.toml
+    return st.secrets["cartola"]["refresh_token"].strip()
+
+def salvar_novo_refresh_token(novo_rt):
+    # Salva o token novo no HD para a próxima vez
+    with open(ARQUIVO_TOKENS, "w") as f:
+        json.dump({"refresh_token": novo_rt}, f)
+
 def gerar_token_fresco():
     try:
-        refresh_token = st.secrets["cartola"]["refresh_token"].strip()
+        refresh_token_atual = obter_refresh_token()
         url_auth = "https://goidc.globo.com/auth/realms/globo.com/protocol/openid-connect/token"
         payload = {
             'client_id': 'cartola-web@apps.globoid',
             'grant_type': 'refresh_token',
-            'refresh_token': refresh_token
+            'refresh_token': refresh_token_atual
         }
         headers = {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -135,10 +152,20 @@ def gerar_token_fresco():
         }
         response = requests.post(url_auth, data=payload, headers=headers)
         if response.status_code == 200:
-            return response.json().get('access_token')
-        return None
+            dados = response.json()
+            novo_access = dados.get('access_token')
+            novo_refresh = dados.get('refresh_token')
+            
+            # ROTATIVIDADE: Se a Globo mandou um refresh token novo, a gente guarda!
+            if novo_refresh and novo_refresh != refresh_token_atual:
+                salvar_novo_refresh_token(novo_refresh)
+                
+            return novo_access
+        else:
+            st.error(f"Erro na renovação do token. Código: {response.status_code}")
+            return None
     except Exception as e:
-        st.error(f"Erro na renovação do token: {e}")
+        st.error(f"Erro interno na renovação do token: {e}")
         return None
 
 def buscar_api(slug):
@@ -147,10 +174,10 @@ def buscar_api(slug):
             st.error("⚠️ Refresh Token não configurado em [cartola] nos Secrets.")
             return None
 
-        # Gera o token válido por 1 hora sempre que clicar no botão
+        # Gera o token válido por 1 hora sempre que clicar no botão, mantendo a rotação
         token = gerar_token_fresco()
         if not token:
-            st.error("⚠️ O Refresh Token expirou ou é inválido. Atualize o arquivo secrets.toml.")
+            st.error("⚠️ O Refresh Token expirou ou é inválido. Atualize o arquivo secrets.toml com um novo.")
             return None
 
         url = f"https://api.cartola.globo.com/auth/liga/{slug}"
