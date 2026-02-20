@@ -139,10 +139,10 @@ def obter_refresh_token():
     sheet_config = conectar_planilha_config()
     if sheet_config:
         try:
-            # Tenta ler a célula A2 da aba Config
-            token = sheet_config.cell(2, 1).value
-            if token and len(token) > 50:
-                return token.strip()
+            # Comando de leitura ajustado
+            val = sheet_config.acell('A2').value
+            if val and len(val) > 50:
+                return val.strip()
         except:
             pass
     # Se a aba estiver vazia ou falhar, puxa o "virgem" do secrets.toml
@@ -152,11 +152,11 @@ def salvar_novo_refresh_token(novo_rt):
     sheet_config = conectar_planilha_config()
     if sheet_config:
         try:
-            # Salva na coluna A, linhas 1 e 2
-            sheet_config.update_acell(1, 1, 'RefreshToken_Atualizado')
-            sheet_config.update_acell(2, 1, novo_rt)
+            # Comando corrigido usando a notação correta (A1, A2)
+            sheet_config.update_acell('A1', 'RefreshToken_Atualizado')
+            sheet_config.update_acell('A2', novo_rt)
         except Exception as e:
-            st.error(f"Erro ao salvar token na aba Config: {e}")
+            st.error(f"Erro ao salvar token no separador Config: {e}")
 
 def gerar_token_fresco():
     try:
@@ -178,7 +178,7 @@ def gerar_token_fresco():
             novo_access = dados.get('access_token')
             novo_refresh = dados.get('refresh_token')
             
-            # ROTATIVIDADE: Se a Globo mandou um refresh token novo, a gente guarda na Planilha!
+            # ROTATIVIDADE: Se a Globo mandou um refresh token novo, guardamos na Planilha
             if novo_refresh and novo_refresh != refresh_token_atual:
                 salvar_novo_refresh_token(novo_refresh)
                 
@@ -199,7 +199,7 @@ def buscar_api(slug):
         # Gera o token válido e faz a rotação automática usando a Planilha
         token = gerar_token_fresco()
         if not token:
-            st.error("⚠️ O Refresh Token expirou ou é inválido. Atualize o arquivo secrets.toml.")
+            st.error("⚠️ O Refresh Token expirou ou é inválido. Atualize o ficheiro secrets.toml.")
             return None
 
         url = f"https://api.cartola.globo.com/auth/liga/{slug}"
@@ -224,7 +224,7 @@ def buscar_api(slug):
                     lambda x: float(x.get('rodada')) if isinstance(x, dict) else 999.0
                 )
                 
-                # Para exibir bonito na tela, do 1º ao último
+                # Para exibir bonito no ecrã, do 1º ao último
                 df_export = df_export.sort_values(by='Posição', ascending=True).reset_index(drop=True)
                 
                 return df_export
@@ -243,7 +243,7 @@ def calcular(df_ranking, df_hist, rod):
     qtd = int((len(df_ranking) * PCT_PAGANTES) + 0.5)
     
     # AJUSTE CRUCIAL: Maior Posição = Pior. Então ordenamos DECRESCENTE (ascending=False)
-    # Assim, o 41º, 40º, 39º ficam no topo da lista para serem cobrados.
+    # Assim, os últimos lugares ficam no topo da lista para serem cobrados.
     rank = df_ranking.sort_values("Posição", ascending=False).reset_index(drop=True)
     
     conta = pd.Series(dtype=int)
