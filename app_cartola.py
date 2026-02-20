@@ -119,14 +119,40 @@ def salvar_dados(df):
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
 
-# --- 5. LÓGICA DE CÁLCULO ---
+# --- 5. LÓGICA DE CÁLCULO E API ---
+def gerar_token_fresco():
+    try:
+        refresh_token = st.secrets["cartola"]["refresh_token"].strip()
+        url_auth = "https://goidc.globo.com/auth/realms/globo.com/protocol/openid-connect/token"
+        payload = {
+            'client_id': 'cartola-web@apps.globoid',
+            'grant_type': 'refresh_token',
+            'refresh_token': refresh_token
+        }
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        }
+        response = requests.post(url_auth, data=payload, headers=headers)
+        if response.status_code == 200:
+            return response.json().get('access_token')
+        return None
+    except Exception as e:
+        st.error(f"Erro na renovação do token: {e}")
+        return None
+
 def buscar_api(slug):
     try:
-        if "cartola" not in st.secrets or "token" not in st.secrets["cartola"]:
-            st.error("⚠️ Token não configurado em [cartola] nos Secrets.")
+        if "cartola" not in st.secrets or "refresh_token" not in st.secrets["cartola"]:
+            st.error("⚠️ Refresh Token não configurado em [cartola] nos Secrets.")
             return None
 
-        token = st.secrets["cartola"]["token"].strip()
+        # Gera o token válido por 1 hora sempre que clicar no botão
+        token = gerar_token_fresco()
+        if not token:
+            st.error("⚠️ O Refresh Token expirou ou é inválido. Atualize o arquivo secrets.toml.")
+            return None
+
         url = f"https://api.cartola.globo.com/auth/liga/{slug}"
         
         headers = {
