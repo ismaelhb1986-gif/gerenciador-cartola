@@ -36,11 +36,6 @@ def configurar_css():
                 
                 /* Diminui o título principal */
                 h1 { font-size: 1.8rem !important; margin-bottom: 0.5rem !important; }
-                
-                /* Diminui drasticamente os números grandes (Métricas) da Aba Pendências */
-                div[data-testid="stMetricValue"] { font-size: 1.4rem !important; }
-                div[data-testid="stMetricLabel"] { font-size: 0.8rem !important; }
-                div[data-testid="metric-container"] { margin-bottom: -15px !important; }
             }
         </style>
     """, unsafe_allow_html=True)
@@ -274,7 +269,7 @@ with tab_resumo:
             disp = disp.join(matrix)
             disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
             
-            # ATUALIZAÇÃO CHAVE: Transforma 'Time' no Índice da tabela para congelar a coluna automaticamente
+            # Tabela Congelada mantida
             disp.index.name = "Time"
             disp = disp.sort_index()
             
@@ -285,11 +280,9 @@ with tab_resumo:
             for c in todas_rodadas:
                 cfg[c] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
-            # Removido o 'hide_index=True' para exibir o Índice Congelado
             edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True)
             
             if st.session_state['admin_unlocked']:
-                # Traz o índice de volta como coluna para o salvamento dos dados
                 m = edit.reset_index().melt(id_vars=["Time"], value_vars=todas_rodadas, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
                 if not m.empty:
                     change = False
@@ -311,13 +304,24 @@ with tab_pendencias:
             ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
             max_rod = int(df_fin["Rodada"].max()) if not df_fin["Rodada"].empty else 0
 
-            # Métricas menores no mobile (Graças ao CSS injetado)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Pago", f"R$ {pg:.2f}")
-            c2.metric("Aberto", f"R$ {ab:.2f}")
-            c3.metric("Última Rod", max_rod)
-            
-            st.divider()
+            # NOVO PLACAR CUSTOMIZADO (Força a exibição lado a lado no Mobile)
+            placar_html = f"""
+            <div style="display: flex; flex-direction: row; justify-content: space-around; align-items: center; background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e9ecef;">
+                <div style="text-align: center; flex: 1;">
+                    <div style="font-size: 0.8rem; color: #6c757d; font-weight: bold; text-transform: uppercase; margin-bottom: 2px;">Pago</div>
+                    <div style="font-size: 1.3rem; font-weight: bold; color: #28a745;">R$ {pg:.2f}</div>
+                </div>
+                <div style="text-align: center; flex: 1; border-left: 1px solid #dee2e6; border-right: 1px solid #dee2e6;">
+                    <div style="font-size: 0.8rem; color: #6c757d; font-weight: bold; text-transform: uppercase; margin-bottom: 2px;">Aberto</div>
+                    <div style="font-size: 1.3rem; font-weight: bold; color: #dc3545;">R$ {ab:.2f}</div>
+                </div>
+                <div style="text-align: center; flex: 1;">
+                    <div style="font-size: 0.8rem; color: #6c757d; font-weight: bold; text-transform: uppercase; margin-bottom: 2px;">Última Rod</div>
+                    <div style="font-size: 1.3rem; font-weight: bold; color: #212529;">{max_rod}</div>
+                </div>
+            </div>
+            """
+            st.markdown(placar_html, unsafe_allow_html=True)
             
             df_devs = df_fin[(df_fin["Valor"] > 0) & (df_fin["Pago"] == False)].copy()
             
