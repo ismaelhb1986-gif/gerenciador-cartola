@@ -19,7 +19,6 @@ NOME_ABA_DADOS = "Dados"
 NOME_ABA_CONFIG = "Config"
 TOTAL_RODADAS_TURNO = 19
 
-# Alterado de "Pontos" para "Posição"
 COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Posição"]
 
 # --- 2. SETUP VISUAL ---
@@ -28,16 +27,35 @@ st.set_page_config(page_title="Gestão Cartola PRO", layout="wide", page_icon="�
 def configurar_css():
     st.markdown("""
         <style>
+            /* COMPORTAMENTO PADRÃO (DESKTOP) */
             .block-container { padding-top: 3.5rem !important; }
-            .admin-floating-container {
+            .status-floating-container {
                 position: fixed; top: 60px; right: 25px; z-index: 9999;
-                background-color: white; padding: 8px 12px;
-                border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border: 1px solid #e0e0e0; text-align: right;
+                background-color: transparent; text-align: right;
             }
             .status-badge {
-                font-size: 0.7rem; font-weight: bold; text-transform: uppercase;
-                letter-spacing: 1px; display: block; margin-top: 4px;
+                font-size: 0.75rem; font-weight: bold; text-transform: uppercase;
+                letter-spacing: 1px; padding: 6px 10px; border-radius: 6px;
+                background-color: white; border: 1px solid #e0e0e0;
+                box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            }
+            
+            /* COMPORTAMENTO RESPONSIVO (MOBILE) */
+            @media (max-width: 768px) {
+                /* Diminui os espaços em branco no topo */
+                .block-container { padding-top: 1.5rem !important; padding-left: 1rem !important; padding-right: 1rem !important; }
+                
+                /* Diminui o título principal */
+                h1 { font-size: 1.8rem !important; margin-bottom: 0.5rem !important; }
+                
+                /* Ajusta o selo de Visitante/Admin para caber no celular sem quebrar a tela */
+                .status-floating-container { top: 20px; right: 15px; }
+                .status-badge { font-size: 0.65rem; padding: 4px 8px; }
+                
+                /* Diminui drasticamente os números grandes (Métricas) da Aba Pendências */
+                div[data-testid="stMetricValue"] { font-size: 1.4rem !important; }
+                div[data-testid="stMetricLabel"] { font-size: 0.8rem !important; }
+                div[data-testid="metric-container"] { margin-bottom: -15px !important; }
             }
         </style>
     """, unsafe_allow_html=True)
@@ -62,7 +80,6 @@ def conectar_gsheets():
         else:
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
         client = gspread.authorize(creds)
-        # 🔒 Alterado para buscar pelo NOME exato da aba de dados
         return client.open(NOME_PLANILHA_GOOGLE).worksheet(NOME_ABA_DADOS)
     except: return None
 
@@ -74,7 +91,6 @@ def conectar_planilha_config():
         else:
             creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
         client = gspread.authorize(creds)
-        # 🔒 Busca pelo NOME exato da aba de config
         return client.open(NOME_PLANILHA_GOOGLE).worksheet(NOME_ABA_CONFIG)
     except: return None
 
@@ -97,7 +113,6 @@ def carregar_dados():
         df = pd.DataFrame(data)
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Migração segura: Se existir a coluna antiga "Pontos", renomeia para "Posição"
         if "Pontos" in df.columns and "Posição" not in df.columns:
             df.rename(columns={"Pontos": "Posição"}, inplace=True)
 
@@ -140,20 +155,15 @@ def obter_refresh_token():
     sheet_config = conectar_planilha_config()
     if sheet_config:
         try:
-            # Comando de leitura ajustado
             val = sheet_config.acell('A2').value
-            if val and len(val) > 50:
-                return val.strip()
-        except:
-            pass
-    # Se a aba estiver vazia ou falhar, puxa o "virgem" do secrets.toml
+            if val and len(val) > 50: return val.strip()
+        except: pass
     return st.secrets["cartola"]["refresh_token"].strip()
 
 def salvar_novo_refresh_token(novo_rt):
     sheet_config = conectar_planilha_config()
     if sheet_config:
         try:
-            # Comando corrigido usando a notação correta (A1, A2)
             sheet_config.update_acell('A1', 'RefreshToken_Atualizado')
             sheet_config.update_acell('A2', novo_rt)
         except Exception as e:
@@ -179,7 +189,6 @@ def gerar_token_fresco():
             novo_access = dados.get('access_token')
             novo_refresh = dados.get('refresh_token')
             
-            # ROTATIVIDADE: Se a Globo mandou um refresh token novo, guardamos na Planilha
             if novo_refresh and novo_refresh != refresh_token_atual:
                 salvar_novo_refresh_token(novo_refresh)
                 
@@ -197,37 +206,25 @@ def buscar_api(slug):
             st.error("⚠️ Refresh Token não configurado em [cartola] nos Secrets.")
             return None
 
-        # Gera o token válido e faz a rotação automática usando a Planilha
         token = gerar_token_fresco()
         if not token:
             st.error("⚠️ O Refresh Token expirou ou é inválido. Atualize o ficheiro secrets.toml.")
             return None
 
         url = f"https://api.cartola.globo.com/auth/liga/{slug}"
-        
-        headers = {
-            'Authorization': f'Bearer {token}',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-        }
-        
+        headers = { 'Authorization': f'Bearer {token}', 'User-Agent': 'Mozilla/5.0' }
         response = requests.get(url, headers=headers)
         
         if response.status_code == 200:
             dados = response.json()
             if dados and 'times' in dados:
                 df_bruto = pd.DataFrame(dados['times'])
-                
                 df_export = pd.DataFrame()
                 df_export['Time'] = df_bruto['nome_cartola']
-                
-                # Mapeado para Posição
                 df_export['Posição'] = df_bruto['ranking'].apply(
                     lambda x: float(x.get('rodada')) if isinstance(x, dict) else 999.0
                 )
-                
-                # Para exibir bonito no ecrã, do 1º ao último
                 df_export = df_export.sort_values(by='Posição', ascending=True).reset_index(drop=True)
-                
                 return df_export
             return None
         else:
@@ -240,11 +237,7 @@ def buscar_api(slug):
 def calcular(df_ranking, df_hist, rod):
     if df_ranking.empty: return [], [], [], 0, 0
     
-    # AJUSTE: Arredondamento matemático padrão
     qtd = int((len(df_ranking) * PCT_PAGANTES) + 0.5)
-    
-    # AJUSTE CRUCIAL: Maior Posição = Pior. Então ordenamos DECRESCENTE (ascending=False)
-    # Assim, os últimos lugares ficam no topo da lista para serem cobrados.
     rank = df_ranking.sort_values("Posição", ascending=False).reset_index(drop=True)
     
     conta = pd.Series(dtype=int)
@@ -265,18 +258,15 @@ def calcular(df_ranking, df_hist, rod):
     return devs, imune, salvos, len(df_ranking), qtd
 
 # --- 6. INTERFACE ---
-st.title("⚽ Os Piá do Cartola")
+# Etiqueta de Status Fixa no Topo (Visível em todas as abas)
+st.markdown('<div class="status-floating-container">', unsafe_allow_html=True)
+if not st.session_state['admin_unlocked']:
+    st.markdown('<span class="status-badge" style="color:#999;">👀 Visitante</span>', unsafe_allow_html=True)
+else:
+    st.markdown('<span class="status-badge" style="color:#28a745;">✅ Admin Ativo</span>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
-with st.container():
-    st.markdown('<div class="admin-floating-container">', unsafe_allow_html=True)
-    if not st.session_state['admin_unlocked']:
-        with st.popover("🔒 Login Admin", use_container_width=True):
-            st.text_input("Senha:", type="password", key="senha_input", on_change=verificar_senha)
-        st.markdown('<span class="status-badge" style="color:#999;">Visitante</span>', unsafe_allow_html=True)
-    else:
-        if st.button("🔓 Sair"): st.session_state['admin_unlocked'] = False; st.rerun()
-        st.markdown('<span class="status-badge" style="color:#28a745;">Admin Ativo</span>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+st.title("⚽ Os Piá do Cartola")
 
 df_fin, status_msg = carregar_dados()
 
@@ -335,10 +325,11 @@ with tab_pendencias:
             ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
             max_rod = int(df_fin["Rodada"].max()) if not df_fin["Rodada"].empty else 0
 
+            # Métricas menores no mobile
             c1, c2, c3 = st.columns(3)
             c1.metric("Pago", f"R$ {pg:.2f}")
             c2.metric("Aberto", f"R$ {ab:.2f}")
-            c3.metric("Última Rodada", max_rod)
+            c3.metric("Última Rod", max_rod)
             
             st.divider()
             
@@ -346,18 +337,20 @@ with tab_pendencias:
             
             if not df_devs.empty:
                 tabela_dev = df_devs.groupby("Time")["Valor"].sum().reset_index(name="Devendo")
-                # Ordena e reseta o index
                 tabela_dev = tabela_dev.sort_values("Devendo", ascending=False).reset_index(drop=True)
-                # Ajusta para começar em 1
                 tabela_dev.index = tabela_dev.index + 1
                 
-                # Layout compacto (1/3 tabela, 2/3 vazio)
                 col_tab, col_vazio = st.columns([1, 2])
                 with col_tab:
                     try:
-                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}).background_gradient(cmap="Reds"))
+                        # Mapa de Calor Restaurado!
+                        st.dataframe(
+                            tabela_dev.style.format({"Devendo": "R$ {:.2f}"})
+                            .background_gradient(cmap="Reds", subset=["Devendo"]),
+                            use_container_width=True
+                        )
                     except:
-                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}))
+                        st.dataframe(tabela_dev.style.format({"Devendo": "R$ {:.2f}"}), use_container_width=True)
             else:
                 st.success("Tudo pago! Ninguém devendo.")
         except Exception as e:
@@ -366,9 +359,17 @@ with tab_pendencias:
 
 # --- ABA 3: ADMIN ---
 with tab_admin:
+    # Login movido integralmente para cá
     if not st.session_state['admin_unlocked']: 
-        st.warning("🔒 Faça login no canto superior direito.")
+        st.info("🔒 Faça login para liberar as ferramentas de lançamento de rodadas.")
+        st.text_input("Senha de Administrador:", type="password", key="senha_input", on_change=verificar_senha)
         st.stop()
+    else:
+        col_btn, _ = st.columns([1, 4])
+        if col_btn.button("🔓 Encerrar Sessão (Sair)", use_container_width=True):
+            st.session_state['admin_unlocked'] = False
+            st.rerun()
+        st.divider()
     
     with st.expander("🚨 Zona de Perigo"):
         if st.button("⚠️ RESETAR BANCO DE DADOS", type="primary"):
@@ -393,7 +394,6 @@ with tab_admin:
             try:
                 x = pd.read_excel(f)
                 x.columns = [str(c).strip().title() for c in x.columns]
-                # Adicionados mais mapeamentos caso a coluna venha com outros nomes do Excel
                 mapa = {"Pontuação": "Posição", "Pts": "Posição", "Pontos": "Posição", "Pos": "Posição", "Nome": "Time", "Participante": "Time", "Equipe": "Time", "Cartoleiro": "Time"}
                 x = x.rename(columns=mapa)
                 if "Time" in x.columns:
