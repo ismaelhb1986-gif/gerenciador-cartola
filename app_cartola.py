@@ -12,7 +12,6 @@ VALOR_RODADA = 7.00
 LIMITE_MAX_PAGAMENTOS = 10
 PCT_PAGANTES = 0.25
 SLUG_LIGA_PADRAO = "os-pia-do-cartola"
-# 🔒 A senha agora vem do arquivo de segredos!
 SENHA_ADMIN = st.secrets["cartola"]["senha_admin"]
 NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
 NOME_ABA_DADOS = "Dados"
@@ -28,29 +27,15 @@ def configurar_css():
     st.markdown("""
         <style>
             /* COMPORTAMENTO PADRÃO (DESKTOP) */
-            .block-container { padding-top: 3.5rem !important; }
-            .status-floating-container {
-                position: fixed; top: 60px; right: 25px; z-index: 9999;
-                background-color: transparent; text-align: right;
-            }
-            .status-badge {
-                font-size: 0.75rem; font-weight: bold; text-transform: uppercase;
-                letter-spacing: 1px; padding: 6px 10px; border-radius: 6px;
-                background-color: white; border: 1px solid #e0e0e0;
-                box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-            }
+            .block-container { padding-top: 2rem !important; }
             
             /* COMPORTAMENTO RESPONSIVO (MOBILE) */
             @media (max-width: 768px) {
-                /* Diminui os espaços em branco no topo */
+                /* Diminui os espaços em branco no topo e nas laterais */
                 .block-container { padding-top: 1.5rem !important; padding-left: 1rem !important; padding-right: 1rem !important; }
                 
                 /* Diminui o título principal */
                 h1 { font-size: 1.8rem !important; margin-bottom: 0.5rem !important; }
-                
-                /* Ajusta o selo de Visitante/Admin para caber no celular sem quebrar a tela */
-                .status-floating-container { top: 20px; right: 15px; }
-                .status-badge { font-size: 0.65rem; padding: 4px 8px; }
                 
                 /* Diminui drasticamente os números grandes (Métricas) da Aba Pendências */
                 div[data-testid="stMetricValue"] { font-size: 1.4rem !important; }
@@ -258,15 +243,13 @@ def calcular(df_ranking, df_hist, rod):
     return devs, imune, salvos, len(df_ranking), qtd
 
 # --- 6. INTERFACE ---
-# Etiqueta de Status Fixa no Topo (Visível em todas as abas)
-st.markdown('<div class="status-floating-container">', unsafe_allow_html=True)
-if not st.session_state['admin_unlocked']:
-    st.markdown('<span class="status-badge" style="color:#999;">👀 Visitante</span>', unsafe_allow_html=True)
+# Título Híbrido com Status Integrado
+if st.session_state['admin_unlocked']:
+    status_html = '<span style="font-size: 0.45em; color: #28a745; font-weight: normal; vertical-align: middle;">(Admin Ativo)</span>'
 else:
-    st.markdown('<span class="status-badge" style="color:#28a745;">✅ Admin Ativo</span>', unsafe_allow_html=True)
-st.markdown('</div>', unsafe_allow_html=True)
+    status_html = '<span style="font-size: 0.45em; color: #6c757d; font-weight: normal; vertical-align: middle;">(Visitante)</span>'
 
-st.title("⚽ Os Piá do Cartola")
+st.markdown(f'<h1 style="margin-bottom: 0;">⚽ Os Piá do Cartola {status_html}</h1>', unsafe_allow_html=True)
 
 df_fin, status_msg = carregar_dados()
 
@@ -325,7 +308,7 @@ with tab_pendencias:
             ab = df_fin[(df_fin["Pago"] == False) & (df_fin["Valor"] > 0)]["Valor"].sum()
             max_rod = int(df_fin["Rodada"].max()) if not df_fin["Rodada"].empty else 0
 
-            # Métricas menores no mobile
+            # Métricas menores no mobile (Graças ao CSS injetado)
             c1, c2, c3 = st.columns(3)
             c1.metric("Pago", f"R$ {pg:.2f}")
             c2.metric("Aberto", f"R$ {ab:.2f}")
@@ -343,7 +326,7 @@ with tab_pendencias:
                 col_tab, col_vazio = st.columns([1, 2])
                 with col_tab:
                     try:
-                        # Mapa de Calor Restaurado!
+                        # Mapa de Calor Restaurado (Requer matplotlib e jinja2 no requirements.txt)
                         st.dataframe(
                             tabela_dev.style.format({"Devendo": "R$ {:.2f}"})
                             .background_gradient(cmap="Reds", subset=["Devendo"]),
@@ -359,7 +342,7 @@ with tab_pendencias:
 
 # --- ABA 3: ADMIN ---
 with tab_admin:
-    # Login movido integralmente para cá
+    # Login exclusivo na aba Admin
     if not st.session_state['admin_unlocked']: 
         st.info("🔒 Faça login para liberar as ferramentas de lançamento de rodadas.")
         st.text_input("Senha de Administrador:", type="password", key="senha_input", on_change=verificar_senha)
