@@ -273,21 +273,24 @@ with tab_resumo:
             disp = pd.DataFrame(index=df_fin["Time"].unique()).join(cobrancas).fillna(0).astype(int)
             disp = disp.join(matrix)
             disp.insert(0, "Status", disp["Cobranças"].apply(lambda x: "⚠️ >10" if x >= LIMITE_MAX_PAGAMENTOS else "Ativo"))
+            
+            # ATUALIZAÇÃO CHAVE: Transforma 'Time' no Índice da tabela para congelar a coluna automaticamente
             disp.index.name = "Time"
-            disp = disp.reset_index().sort_values("Time")
+            disp = disp.sort_index()
             
             cfg = {
-                "Time": st.column_config.TextColumn(disabled=True),
                 "Status": st.column_config.TextColumn(width="small", disabled=True),
                 "Cobranças": st.column_config.NumberColumn(width="small", disabled=True)
             }
             for c in todas_rodadas:
                 cfg[c] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
-            edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, hide_index=True)
+            # Removido o 'hide_index=True' para exibir o Índice Congelado
+            edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True)
             
             if st.session_state['admin_unlocked']:
-                m = edit.melt(id_vars=["Time"], value_vars=todas_rodadas, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
+                # Traz o índice de volta como coluna para o salvamento dos dados
+                m = edit.reset_index().melt(id_vars=["Time"], value_vars=todas_rodadas, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
                 if not m.empty:
                     change = False
                     for _, r in m.iterrows():
@@ -326,7 +329,7 @@ with tab_pendencias:
                 col_tab, col_vazio = st.columns([1, 2])
                 with col_tab:
                     try:
-                        # Mapa de Calor Restaurado (Requer matplotlib e jinja2 no requirements.txt)
+                        # Mapa de Calor Restaurado
                         st.dataframe(
                             tabela_dev.style.format({"Devendo": "R$ {:.2f}"})
                             .background_gradient(cmap="Reds", subset=["Devendo"]),
