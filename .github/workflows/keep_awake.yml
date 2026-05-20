@@ -2,8 +2,8 @@ name: Keep App Awake
 
 on:
   schedule:
-    - cron: "0 */10 * * *" # Executa automaticamente a cada 10 horas
-  workflow_dispatch: # Permite que você clique para rodar o script manualmente, se quiser
+    - cron: "0 */10 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,9 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Commit Vazio e Push
+      - name: Ping Real e Push
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git commit --allow-empty -m "chore: ping automatico para evitar hibernacao"
+          date +%s > .keepalive
+          git add .keepalive
+          git commit -m "chore: ping automatico para evitar hibernacao"
           git push
