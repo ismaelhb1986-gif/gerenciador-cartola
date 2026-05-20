@@ -1,0 +1,22 @@
+name: Keep App Awake
+
+on:
+  schedule:
+    - cron: "0 */10 * * *" # Executa automaticamente a cada 10 horas
+  workflow_dispatch: # Permite que você clique para rodar o script manualmente, se quiser
+
+permissions:
+  contents: write
+
+jobs:
+  keep-awake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Commit Vazio e Push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git commit --allow-empty -m "chore: ping automatico para evitar hibernacao"
+          git push
