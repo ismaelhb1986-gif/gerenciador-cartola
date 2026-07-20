@@ -17,6 +17,10 @@ NOME_PLANILHA_GOOGLE = "Controle_Cartola_2026"
 NOME_ABA_DADOS = "Dados"
 NOME_ABA_CONFIG = "Config"
 TOTAL_RODADAS_TURNO = 19
+NOME_ABA_PERIODO = "Periodo"
+PERIODO_INICIO_PADRAO = 1
+PERIODO_FIM_PADRAO = 19
+RODADA_MAXIMA = 380
 
 COLUNAS_ESPERADAS = ["Data", "Rodada", "Time", "Valor", "Pago", "Motivo", "Posição"]
 
@@ -73,6 +77,55 @@ def conectar_planilha_config():
         client = gspread.authorize(creds)
         return client.open(NOME_PLANILHA_GOOGLE).worksheet(NOME_ABA_CONFIG)
     except: return None
+
+def conectar_planilha_periodo():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
+        else:
+            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        client = gspread.authorize(creds)
+        planilha = client.open(NOME_PLANILHA_GOOGLE)
+        try:
+            return planilha.worksheet(NOME_ABA_PERIODO)
+        except Exception:
+            ws = planilha.add_worksheet(title=NOME_ABA_PERIODO, rows=10, cols=5)
+            ws.update_acell("A1", "Inicio")
+            ws.update_acell("B1", "fim")
+            ws.update_acell("A2", PERIODO_INICIO_PADRAO)
+            ws.update_acell("B2", PERIODO_FIM_PADRAO)
+            return ws
+    except: return None
+
+def carregar_periodo():
+    """Le rodada de inicio (A2) e fim (B2) da aba Periodo, com validacao."""
+    inicio, fim = PERIODO_INICIO_PADRAO, PERIODO_FIM_PADRAO
+    ws = conectar_planilha_periodo()
+    if ws:
+        try:
+            v_ini = ws.acell("A2").value
+            v_fim = ws.acell("B2").value
+            if v_ini not in (None, ""): inicio = int(float(str(v_ini).strip().replace(",", ".")))
+            if v_fim not in (None, ""): fim = int(float(str(v_fim).strip().replace(",", ".")))
+        except: pass
+    inicio = max(1, min(inicio, RODADA_MAXIMA))
+    fim = max(1, min(fim, RODADA_MAXIMA))
+    if inicio > fim: inicio, fim = fim, inicio
+    return inicio, fim
+
+def salvar_periodo(inicio, fim):
+    ws = conectar_planilha_periodo()
+    if ws:
+        try:
+            ws.update_acell("A1", "Inicio")
+            ws.update_acell("B1", "fim")
+            ws.update_acell("A2", int(inicio))
+            ws.update_acell("B2", int(fim))
+            return True
+        except Exception as e:
+            st.error(f"Erro ao salvar periodo na aba {NOME_ABA_PERIODO}: {e}")
+    return False
 
 def resetar_banco_dados():
     sheet = conectar_gsheets()
@@ -246,6 +299,7 @@ else:
 
 st.markdown(f'<h1 style="margin-bottom: 0;">⚽ Os Piá do Cartola {status_html}</h1>', unsafe_allow_html=True)
 
+rodada_inicio, rodada_fim = carregar_periodo()
 df_fin, status_msg = carregar_dados()
 
 tab_resumo, tab_pendencias, tab_admin = st.tabs(["📋 Resumo", "💰 Pendências", "⚙️ Painel Admin"])
@@ -259,7 +313,7 @@ with tab_resumo:
             df_v["V"] = df_v.apply(lambda x: None if x["Valor"] == 0 else x["Pago"], axis=1)
             df_v["Rodada_Str"] = df_v["Rodada"].astype(int).astype(str)
             matrix = df_v.pivot_table(index="Time", columns="Rodada_Str", values="V", aggfunc="last")
-            todas_rodadas = [str(i) for i in range(1, TOTAL_RODADAS_TURNO + 1)]
+            todas_rodadas = [str(i) for i in range(rodada_inicio, rodada_fim + 1)]
             matrix = matrix.reindex(columns=todas_rodadas)
             matrix = matrix.astype(object)
             matrix = matrix.where(pd.notnull(matrix), None)
@@ -365,10 +419,25 @@ with tab_admin:
         if st.button("⚠️ RESETAR BANCO DE DADOS", type="primary"):
             if resetar_banco_dados(): st.success("Resetado!"); time.sleep(2); st.rerun()
 
+    with st.expander("🗓️ Configurar Período de Rodadas"):
+        st.caption(f"Período salvo atualmente: rodada {rodada_inicio} até {rodada_fim} (intervalo inclusivo). Salvo na aba '{NOME_ABA_PERIODO}' (A2 e B2).")
+        cp1, cp2 = st.columns(2)
+        novo_inicio = cp1.number_input("Rodada de Início", min_value=1, max_value=RODADA_MAXIMA, value=rodada_inicio, step=1, key="periodo_inicio")
+        novo_fim = cp2.number_input("Rodada de Fim", min_value=1, max_value=RODADA_MAXIMA, value=rodada_fim, step=1, key="periodo_fim")
+        if st.button("💾 Salvar Período"):
+            if int(novo_inicio) > int(novo_fim):
+                st.error("A rodada de início não pode ser maior que a rodada de fim.")
+            elif salvar_periodo(int(novo_inicio), int(novo_fim)):
+                st.toast("✅ Período atualizado!", icon="🗓️")
+                time.sleep(1)
+                st.rerun()
+
+    st.divider()
+
     st.subheader("Lançar Rodada")
     c1, c2 = st.columns([2, 1])
     origem = c1.radio("Fonte:", ["Excel", "API"], horizontal=True)
-    rod = c2.number_input("Rodada", 1, TOTAL_RODADAS_TURNO, 1)
+    rod = c2.number_input("Rodada", rodada_inicio, rodada_fim, rodada_inicio)
     
     if 'temp' not in st.session_state: st.session_state['temp'] = pd.DataFrame(columns=["Time", "Posição"])
     
