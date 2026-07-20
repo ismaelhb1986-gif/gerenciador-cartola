@@ -255,7 +255,7 @@ def buscar_api(slug):
                 df_export = pd.DataFrame()
                 df_export['Time'] = df_bruto['nome_cartola']
                 df_export['Posição'] = df_bruto['ranking'].apply(
-                    lambda x: float(x.get('rodada')) if isinstance(x, dict) else 999.0
+                    lambda x: float(x.get('rodada')) if isinstance(x, dict) and x.get('rodada') is not None else 999.0
                 )
                 df_export = df_export.sort_values(by='Posição', ascending=True).reset_index(drop=True)
                 return df_export
