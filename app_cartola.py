@@ -334,19 +334,28 @@ with tab_resumo:
             for c in todas_rodadas:
                 cfg[c] = st.column_config.CheckboxColumn(f"{c}", width="small", disabled=not st.session_state['admin_unlocked'])
             
-            edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True)
+            edit = st.data_editor(disp, column_config=cfg, height=600, use_container_width=True, key="editor_resumo")
             
             if st.session_state['admin_unlocked']:
                 m = edit.reset_index().melt(id_vars=["Time"], value_vars=todas_rodadas, var_name="Rodada", value_name="Nv").dropna(subset=["Nv"])
+                df_edit = df_fin.copy()
+                change = False
                 if not m.empty:
-                    change = False
                     for _, r in m.iterrows():
-                        mask = (df_fin["Time"]==r["Time"]) & (df_fin["Rodada"]==int(r["Rodada"])) & (df_fin["Valor"]>0)
+                        mask = (df_edit["Time"]==r["Time"]) & (df_edit["Rodada"]==int(r["Rodada"])) & (df_edit["Valor"]>0)
                         if mask.any():
-                            idx = df_fin[mask].index[0]
-                            if bool(df_fin.at[idx, "Pago"]) != bool(r["Nv"]):
-                                df_fin.at[idx, "Pago"] = bool(r["Nv"]); change = True
-                    if change: salvar_dados(df_fin); st.toast("✅ Atualizado!", icon="☁️"); time.sleep(1); st.rerun()
+                            idx = df_edit[mask].index[0]
+                            if bool(df_edit.at[idx, "Pago"]) != bool(r["Nv"]):
+                                df_edit.at[idx, "Pago"] = bool(r["Nv"]); change = True
+                
+                if change:
+                    st.warning("⚠️ Há alterações não salvas. Clique em **Salvar Alterações** para gravar no banco.")
+                
+                if st.button("💾 Salvar Alterações", type="primary", disabled=not change, use_container_width=True):
+                    salvar_dados(df_edit)
+                    st.toast("✅ Atualizado!", icon="☁️")
+                    time.sleep(1)
+                    st.rerun()
         except Exception as e: st.error(f"Erro Visualização Resumo: {e}")
     else: st.info("Banco de dados vazio. Aguardando lançamentos do Admin.")
 
