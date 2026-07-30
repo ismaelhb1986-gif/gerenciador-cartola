@@ -55,7 +55,7 @@ def verificar_senha():
         st.toast("⛔ Senha incorreta!", icon="❌")
 
 # --- 4. CONEXÃO GOOGLE SHEETS ---
-@st.cache_resource(ttl=0)
+@st.cache_resource
 def conectar_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
@@ -98,6 +98,7 @@ def conectar_planilha_periodo():
             return ws
     except: return None
 
+@st.cache_data(ttl=300, show_spinner=False)
 def carregar_periodo():
     """Le rodada de inicio (A2) e fim (B2) da aba Periodo, com validacao."""
     inicio, fim = PERIODO_INICIO_PADRAO, PERIODO_FIM_PADRAO
@@ -122,6 +123,7 @@ def salvar_periodo(inicio, fim):
             ws.update_acell("B1", "fim")
             ws.update_acell("A2", int(inicio))
             ws.update_acell("B2", int(fim))
+            carregar_periodo.clear()  # invalida o cache do periodo apos salvar
             return True
         except Exception as e:
             st.error(f"Erro ao salvar periodo na aba {NOME_ABA_PERIODO}: {e}")
@@ -132,9 +134,11 @@ def resetar_banco_dados():
     if sheet:
         sheet.clear()
         sheet.append_row(COLUNAS_ESPERADAS)
+        carregar_dados.clear()  # invalida o cache apos resetar
         return True
     return False
 
+@st.cache_data(ttl=300, show_spinner=False)
 def carregar_dados():
     sheet = conectar_gsheets()
     if not sheet: return pd.DataFrame(columns=COLUNAS_ESPERADAS), "Erro Conexão"
@@ -182,6 +186,7 @@ def salvar_dados(df):
         df_save = df_save.fillna("")
         sheet.clear()
         sheet.update([df_save.columns.values.tolist()] + df_save.values.tolist())
+        carregar_dados.clear()  # invalida o cache para reler dados atualizados no proximo rerun
 
 # --- 5. LÓGICA DE CÁLCULO E API ---
 def obter_refresh_token():
